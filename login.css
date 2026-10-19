@@ -1,0 +1,406 @@
+/* ============================================================================
+   登录页设计（2026-10-15 重做）
+   参考 2026 年 SaaS 登录页主流做法：左右分屏 + 动态极光背景 + 毛玻璃卡片。
+   特点：
+     · 左侧品牌区承担「展示 ERP 功能」的任务（经理要求），手机端自动收成顶部横幅
+     · 背景是纯 CSS 渐变光斑 + 关键帧漂移，不引任何图片/库（首屏零额外请求）
+     · 尊重 prefers-reduced-motion：关掉动画只留静态渐变
+     · 登录表单沿用原有 id，app.js 零改动
+   ============================================================================ */
+#login-view{
+  display:grid;grid-template-columns:1.08fr 1fr;align-items:stretch;
+  min-height:100vh;background:#0b1220;
+}
+
+/* ---------- 左：品牌与功能展示 ---------- */
+.lp-brand{
+  position:relative;overflow:hidden;color:#fff;
+  padding:clamp(32px,4.5vw,64px);display:flex;align-items:center;
+  background:
+    radial-gradient(120% 90% at 8% 6%,rgba(11,208,106,.34),transparent 58%),
+    radial-gradient(100% 80% at 92% 22%,rgba(56,132,255,.30),transparent 60%),
+    radial-gradient(90% 90% at 50% 108%,rgba(0,196,168,.26),transparent 62%),
+    linear-gradient(160deg,#0d1a2b,#0a1018 60%,#0b1220);
+}
+/* 极光光斑：4 团不同色/不同周期漂移，制造「缓慢流动」的层次 */
+.lp-aurora{position:absolute;inset:-18%;pointer-events:none;}
+.lp-blob{
+  position:absolute;border-radius:50%;filter:blur(58px);opacity:.55;
+  will-change:transform;
+}
+.lp-b1{width:46vmax;height:46vmax;left:-8%;top:-10%;
+  background:radial-gradient(circle,rgba(11,208,106,.72),transparent 68%);
+  animation:lpDrift1 19s ease-in-out infinite alternate;}
+.lp-b2{width:40vmax;height:40vmax;right:-6%;top:6%;
+  background:radial-gradient(circle,rgba(56,132,255,.62),transparent 68%);
+  animation:lpDrift2 23s ease-in-out infinite alternate;}
+.lp-b3{width:34vmax;height:34vmax;left:16%;bottom:-14%;
+  background:radial-gradient(circle,rgba(0,208,180,.52),transparent 68%);
+  animation:lpDrift3 27s ease-in-out infinite alternate;}
+.lp-b4{width:22vmax;height:22vmax;right:22%;bottom:6%;
+  background:radial-gradient(circle,rgba(255,214,102,.34),transparent 70%);
+  animation:lpDrift1 31s ease-in-out infinite alternate-reverse;}
+@keyframes lpDrift1{to{transform:translate3d(9vw,7vh,0) scale(1.16);}}
+@keyframes lpDrift2{to{transform:translate3d(-11vw,10vh,0) scale(1.1);}}
+@keyframes lpDrift3{to{transform:translate3d(7vw,-9vh,0) scale(1.2);}}
+/* 极细网点纹理，压住大面积渐变的「塑料感」，让层次更像纸面 */
+.lp-grain{
+  position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background:radial-gradient(rgba(255,255,255,.055) .8px,transparent .8px);
+  background-size:4px 4px;
+}
+.lp-brandinner{position:relative;z-index:1;max-width:560px;width:100%;}
+
+.lp-logo{display:flex;align-items:center;gap:11px;margin-bottom:26px;flex-wrap:wrap;}
+.lp-logo img{
+  width:44px;height:44px;border-radius:13px;flex:none;display:block;
+  box-shadow:0 8px 22px rgba(0,0,0,.42),0 0 0 1px rgba(255,255,255,.14);
+}
+.lp-logo b{font-size:20px;letter-spacing:.6px;}
+.lp-logo i{
+  font-style:normal;font-size:11.5px;padding:3px 10px;border-radius:12px;
+  background:rgba(255,255,255,.13);border:1px solid rgba(255,255,255,.2);color:rgba(255,255,255,.86);
+}
+.lp-brandinner h2{
+  margin:0 0 12px;font-size:clamp(27px,3.1vw,40px);line-height:1.2;
+  letter-spacing:-.5px;font-weight:800;text-wrap:balance;
+  text-shadow:0 2px 18px rgba(0,0,0,.28);
+}
+.lp-lead{
+  margin:0 0 26px;font-size:14.5px;line-height:1.85;color:rgba(255,255,255,.78);
+  max-width:480px;text-wrap:pretty;
+}
+
+/* 功能清单：逐条淡入上浮（stagger） */
+.lp-feats{list-style:none;margin:0 0 26px;padding:0;display:grid;gap:9px;}
+.lp-feats li{
+  display:grid;grid-template-columns:34px 1fr;grid-template-rows:auto auto;gap:0 12px;
+  align-items:center;padding:10px 13px;border-radius:13px;
+  background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.1);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  opacity:0;transform:translateY(12px);
+  animation:lpIn .62s cubic-bezier(.2,.8,.3,1) forwards;
+  transition:background .2s ease,border-color .2s ease,transform .2s ease;
+}
+.lp-feats li:nth-child(1){animation-delay:.06s}
+.lp-feats li:nth-child(2){animation-delay:.14s}
+.lp-feats li:nth-child(3){animation-delay:.22s}
+.lp-feats li:nth-child(4){animation-delay:.30s}
+.lp-feats li:nth-child(5){animation-delay:.38s}
+.lp-feats li:nth-child(6){animation-delay:.46s}
+@keyframes lpIn{to{opacity:1;transform:none;}}
+.lp-feats li:hover{
+  background:rgba(255,255,255,.1);border-color:rgba(11,208,106,.42);transform:translateX(3px);
+}
+.lp-feats .fi{
+  grid-row:span 2;width:34px;height:34px;border-radius:10px;display:flex;
+  align-items:center;justify-content:center;font-size:18px;
+  background:linear-gradient(135deg,rgba(11,208,106,.3),rgba(56,132,255,.24));
+  border:1px solid rgba(255,255,255,.14);
+}
+.lp-feats b{font-size:14px;font-weight:650;line-height:1.35;}
+.lp-feats i{font-style:normal;font-size:12px;color:rgba(255,255,255,.62);line-height:1.5;}
+
+.lp-stats{display:flex;gap:26px;flex-wrap:wrap;}
+.lp-stats div{display:flex;flex-direction:column;gap:2px;}
+.lp-stats b{font-size:19px;font-weight:750;letter-spacing:.3px;}
+.lp-stats i{font-style:normal;font-size:11.5px;color:rgba(255,255,255,.55);}
+
+/* ---------- 右：登录表单 ---------- */
+/* 🔴 2026-10-18 经理报「首页留白太多 + 下载按钮太大」。
+   实测（Playwright）：.lp-dlbar-btn 宽 648px 而 .lp-card 只有 390px —— 下载条
+   `width:100%` 吃满整栏，比主卡片还宽一大截，视觉上喧宾夺主；上下各留白 152px
+   也不像「设计过的居中」，像内容没撑满。
+
+   ✅ 正解：用 --lpw 统一约束「卡片 / 下载条 / 版权行」三者的宽度上限，
+      它们在一条竖轴上对齐；同时收紧 padding 与间距，空白自然收掉。
+   📌 卡片本身的 max-width:390px 保持不变（那是表单可读宽度，不该被这里放大）。 */
+.lp-form{
+  --lpw:390px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;
+  padding:24px 22px;background:#f4f6f8;
+}
+.lp-form > .lp-dlbar,.lp-form > .lp-ver{max-width:var(--lpw);}
+/* 卡片上方一抹品牌色辉光，与左区呼应 */
+.lp-card{
+  position:relative;width:100%;max-width:390px;background:#fff;
+  border-radius:18px;padding:34px 28px 26px;text-align:center;
+  box-shadow:0 18px 46px rgba(16,32,54,.14),0 2px 6px rgba(16,32,54,.06);
+  overflow:hidden;
+  animation:lpCardIn .5s cubic-bezier(.2,.8,.3,1) both;
+}
+@keyframes lpCardIn{from{opacity:0;transform:translateY(16px) scale(.985)}to{opacity:1;transform:none;}}
+.lp-cardglow{
+  position:absolute;top:-60%;left:50%;transform:translateX(-50%);
+  width:130%;height:120%;pointer-events:none;
+  background:radial-gradient(circle at 50% 100%,rgba(11,208,106,.16),transparent 62%);
+}
+.lp-card h1{
+  position:relative;margin:0 0 4px;font-size:24px;font-weight:800;letter-spacing:-.3px;
+  color:#0e1626;
+}
+.lp-card .muted{position:relative;margin:0 0 18px;font-size:13px;color:#8a94a3;}
+.lp-card .lp-tabs{position:relative;margin-bottom:14px !important;}
+.lp-card input,#captcha-row{
+  position:relative;
+}
+.lp-card > input{
+  width:100%;padding:13px;border:1.5px solid #e3e8ee;border-radius:11px;
+  margin-top:12px;font-size:16px;background:#fbfcfd;color:#0e1626;
+  transition:border-color .18s ease,box-shadow .18s ease,background .18s ease;
+}
+.lp-card > input::placeholder{color:#a6b0bd;}
+.lp-card > input:focus{
+  outline:none;border-color:#07c160;background:#fff;
+  box-shadow:0 0 0 4px rgba(7,193,96,.13);
+}
+.lp-card select{
+  width:100%;padding:11px;border:1.5px solid #e3e8ee;border-radius:11px;
+  font-family:inherit;font-size:15px;background:#fbfcfd;margin-top:6px;
+}
+.lp-card label{font-size:12.5px;color:#6b7684;text-align:left;}
+.lp-card .trust-row input[type=checkbox]{
+  width:17px;height:17px;min-width:17px;padding:0;margin:0;flex:none;accent-color:#07c160;
+}
+.lp-card .trust-row{color:#4a5563;}
+.lp-card .btn-primary{
+  position:relative;width:100%;padding:14px;border:none;border-radius:11px;
+  background:linear-gradient(135deg,#0bd06a,#049454);color:#fff;font-size:16.5px;
+  font-weight:650;letter-spacing:.5px;margin-top:18px;cursor:pointer;
+  box-shadow:0 8px 20px rgba(4,148,84,.3);
+  transition:transform .13s ease,box-shadow .2s ease,filter .2s ease;
+}
+.lp-card .btn-primary:hover{transform:translateY(-1px);box-shadow:0 12px 26px rgba(4,148,84,.38);filter:saturate(1.06);}
+.lp-card .btn-primary:active{transform:translateY(0);box-shadow:0 5px 14px rgba(4,148,84,.3);}
+.lp-card .err{min-height:18px;font-size:13px;color:#e5484d;margin:8px 0 0;}
+.lp-card .login-foot{
+  margin:6px 0 0;padding-top:14px;border-top:1px solid #eef1f4;
+  font-size:11.5px;color:#98a2b0;line-height:1.8;
+}
+.lp-card .login-foot a{color:#06a050;text-decoration:none;font-weight:600;}
+.lp-card .login-foot a:hover{text-decoration:underline;}
+
+/* 页脚版本行 */
+.lp-ver{margin:2px 0 0;width:100%;font-size:11px;color:#a3adba;text-align:center;}
+.lp-ver a{color:#8b95a3;}
+
+/* ---------- 响应式：≤920px 品牌区收成顶部横幅 ---------- */
+@media (max-width:920px){
+  #login-view{grid-template-columns:1fr;min-height:100vh;}
+  .lp-brand{
+    padding:26px 20px 22px;align-items:flex-start;
+    min-height:auto;border-bottom-left-radius:20px;border-bottom-right-radius:20px;
+  }
+  .lp-brandinner h2{font-size:23px;margin-bottom:8px;}
+  .lp-lead{font-size:13px;margin-bottom:0;line-height:1.7;}
+  /* 功能清单与数据在手机端收起：登录是第一优先，别让功能介绍把表单挤到屏幕外 */
+  .lp-feats,.lp-stats{display:none;}
+  .lp-logo{margin-bottom:14px;}
+  .lp-logo img{width:38px;height:38px;border-radius:11px;}
+  .lp-form{padding:18px 16px 26px;justify-content:flex-start;}
+  .lp-card{padding:26px 20px 20px;border-radius:16px;}
+  .lp-card h1{font-size:21px;}
+}
+/* 超窄屏：连 lead 都收，保证表单一屏可见 */
+@media (max-width:400px){
+  .lp-lead{display:none;}
+  .lp-brand{padding:20px 16px 18px;}
+}
+
+/* ---------- 矮屏（笔记本 1366×600 / 1080×560 这类）---------- */
+/* 🔴 2026-10-18 实测：`#login-view{min-height:100vh}` 遇上**内容比视口高**时会按内容撑开，
+   左栏品牌区的 6 条 `.lp-feats`（各带一行说明文字，高 398px）把整页顶到 813~854px，
+   而视口只有 560~600px → 右栏登录卡片下半截（含「登录」按钮）被推到折叠线以下，
+   经理看着就是「首页留白太多 / 按钮够不着」。
+
+   ✅ 正解：按**高度**而不是宽度再开一组断点。视口矮就把功能清单收掉、
+      标题与内边距收紧，让整页回到一屏内。宽屏（≥900px 高）完全不受影响。 */
+@media (min-width:921px) and (max-height:820px){
+  #login-view{min-height:0;}
+  .lp-brand{padding:30px 40px;align-items:flex-start;}
+  .lp-logo{margin-bottom:16px;}
+  .lp-brandinner h2{font-size:30px;margin-bottom:14px;}
+  .lp-lead{margin-bottom:18px;line-height:1.65;}
+  /* 只留标题、藏说明文字：清单的辨识度在 b 上，i 去掉后每条各省 ~18px */
+  .lp-feats{margin-bottom:0;gap:6px;}
+  .lp-feats i{display:none;}
+  .lp-feats b{font-size:13.5px;}
+  .lp-stats{margin-top:18px;}
+}
+@media (min-width:921px) and (max-height:660px){
+  .lp-lead{display:none;}
+  .lp-stats{display:none;}
+}
+
+/* ---------- 无障碍：尊重「减少动态效果」 ---------- */
+@media (prefers-reduced-motion:reduce){
+  .lp-blob{animation:none !important;}
+  .lp-feats li{animation:none !important;opacity:1 !important;transform:none !important;}
+  .lp-card{animation:none !important;}
+  .lp-card .btn-primary{transition:none;}
+  .lp-feats li{transition:none;}
+}
+
+/* ===== v5.5 信任设备面板 ===== */
+/* ============================================================
+   v5.5信任设备面板：首页三按钮（进入开单 / 选择其他账套 / 更换账号）
+   经理需求：账号信任的设备打开首页不再自动跳入系统，
+            改为停在首页显示这三个按钮。
+   ============================================================ */
+
+/* 🔴 信任面板与登录卡互斥显示，但共用 .lp-card 的玻璃底与动画 */
+.lp-trusted{
+  text-align:center;
+  padding-top:34px !important;
+}
+
+/* 头像圆片：用账号首字，免上传图片 */
+.lp-tc-avatar{
+  width:64px;height:64px;margin:0 auto 14px;
+  border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:28px;font-weight:600;color:#fff;
+  background:linear-gradient(135deg,#5DCAA5 0%,#1D9E75 55%,#0F6E56 100%);
+  box-shadow:0 8px 24px rgba(29,158,117,.30);
+  animation:lpTcPop .5s cubic-bezier(.34,1.56,.64,1) both;
+}
+@keyframes lpTcPop{
+  from{opacity:0;transform:scale(.7) translateY(8px);}
+  to  {opacity:1;transform:scale(1) translateY(0);}
+}
+
+/* 「进入开单」要压得住，是这个页面的主行动 */
+.lp-trusted .btn-primary{
+  height:52px;font-size:16px;font-weight:600;
+  border-radius:12px;
+  box-shadow:0 6px 18px rgba(29,158,117,.26);
+  transition:transform .16s ease,box-shadow .16s ease;
+}
+.lp-trusted .btn-primary:active{
+  transform:translateY(1px) scale(.995);
+  box-shadow:0 3px 10px rgba(29,158,117,.22);
+}
+
+/* 次要两按钮：等宽并排，不要一个太大 */
+.lp-tc-actions .btn-sm{
+  height:44px;font-size:14px;border-radius:11px;
+}
+
+/* 账套列表：点「选择其他账套」后展开 */
+.lp-tc-books{
+  margin-top:16px;
+  padding-top:14px;
+  border-top:1px solid rgba(15,110,86,.14);
+  animation:lpTcSlide .26s ease both;
+}
+@keyframes lpTcSlide{
+  from{opacity:0;transform:translateY(-6px);}
+  to  {opacity:1;transform:translateY(0);}
+}
+.lp-tc-bt{
+  font-size:12px;margin:0 0 8px;color:#5F5E5A;
+}
+/* 🔴 账套行：整行可点，高度不低于 48px（手指友好） */
+.lp-tc-book{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  width:100%;min-height:48px;padding:10px 14px;margin-bottom:8px;
+  border:1px solid rgba(15,110,86,.18);
+  border-radius:11px;
+  background:rgba(255,255,255,.66);
+  font-size:14px;color:#2C2C2A;text-align:left;cursor:pointer;
+  transition:border-color .16s ease,background .16s ease,transform .12s ease;
+}
+.lp-tc-book b{font-weight:500;flex:1;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.lp-tc-book i{font-style:normal;font-size:12px;color:#0F6E56;flex:none;}
+.lp-tc-book:hover{border-color:rgba(15,110,86,.34);background:rgba(255,255,255,.86);}
+.lp-tc-book:active{transform:scale(.99);}
+.lp-tc-book.cur{
+  border-color:#1D9E75;background:rgba(29,158,117,.09);
+}
+.lp-tc-book:disabled{opacity:.6;cursor:default;}
+
+/* 底部小字提示 */
+.lp-tc-hint{
+  margin:14px 0 0;font-size:12px;line-height:1.6;
+  color:#888780;
+}
+
+/* ---------- 手机端：按钮排布更好按 ---------- */
+@media (max-width:920px){
+  .lp-tc-avatar{width:56px;height:56px;font-size:24px;margin-bottom:12px;}
+  .lp-trusted{padding-top:26px !important;}
+  .lp-tc-actions{gap:8px !important;}
+  .lp-tc-actions .btn-sm{height:46px;font-size:13px;}
+  .lp-tc-book{min-height:52px;padding:12px 14px;}
+}
+
+/* 超窄屏：两按钮竖排，避免挤成两行省略号 */
+@media (max-width:400px){
+  .lp-tc-actions{flex-direction:column !important;}
+  .lp-tc-actions .btn-sm{width:100%;}
+}
+
+/* ---------- 无障碍 ---------- */
+@media (prefers-reduced-motion:reduce){
+  .lp-tc-avatar,.lp-tc-books{animation:none !important;}
+  .lp-tc-book,.lp-trusted .btn-primary{transition:none;}
+}
+/* 🔴 v5.5「关闭本设备的免密信任」：低调但可点，别跟三个主按钮抢 */
+.lp-tc-unbind{
+  display:block;width:100%;margin:14px 0 0;
+  padding:11px 12px;border:1px dashed rgba(15,110,86,.32);
+  border-radius:10px;background:transparent;
+  color:#5F5E5A;font-size:12.5px;cursor:pointer;
+  transition:border-color .16s ease,color .16s ease,background .16s ease;
+}
+.lp-tc-unbind:hover{
+  border-color:#A32D2D;color:#A32D2D;background:rgba(163,45,45,.05);
+}
+.lp-tc-unbind:active{transform:scale(.995);}
+
+/* ==========================================================================
+   🔴 v5.5 移动版下载条（登录页）
+   位置：在信任面板 / 登录卡片之外，登录前后都可见。
+   视觉：与侧栏 .apk-btn 同源（绿渐变），但用浅色底以适配登录页的亮背景。
+   ========================================================================== */
+/* 🔴 2026-10-18：原来 width:100% 让下载条横贯整栏（实测 648px vs 卡片 390px），
+   且 padding:12px 14px + 38px 图标偏大。收窄到与卡片同宽、压扁一档，
+   让它退回到「次要入口」的层级，不再和主按钮抢视觉。 */
+.lp-dlbar{width:100%;margin-top:2px;}
+.lp-dlbar-btn{
+  display:flex;align-items:center;gap:10px;
+  padding:9px 12px;border-radius:12px;text-decoration:none;
+  background:linear-gradient(135deg,rgba(11,208,106,.12),rgba(4,148,84,.08));
+  border:1px solid rgba(4,148,84,.24);
+  box-shadow:0 1px 6px rgba(4,148,84,.08);
+  transition:transform .12s ease,box-shadow .12s ease,border-color .12s ease;
+}
+.lp-dlbar-btn:hover{
+  transform:translateY(-1px);
+  box-shadow:0 6px 18px rgba(4,148,84,.20);
+  border-color:rgba(4,148,84,.45);
+}
+.lp-dlbar-btn:active{transform:translateY(0);}
+.lp-dlbar-ico{
+  width:30px;height:30px;border-radius:8px;flex:none;background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.08);
+}
+.lp-dlbar-txt{display:flex;flex-direction:column;line-height:1.32;min-width:0;flex:1;}
+.lp-dlbar-txt b{color:#0B6B49;font-size:13px;font-weight:700;}
+.lp-dlbar-txt i{color:#5F5E5A;font-size:11px;font-style:normal;}
+.lp-dlbar-qr{
+  width:36px;height:36px;flex:none;border-radius:6px;background:#fff;
+  border:1px solid rgba(0,0,0,.07);
+  background-repeat:no-repeat;background-position:center;background-size:100% 100%;
+}
+.lp-dlbar-qr:empty{display:none;}
+
+@media (max-width:420px){
+  .lp-dlbar-txt i{display:none;}
+  .lp-dlbar-qr{width:40px;height:40px;}
+}
+@media (prefers-reduced-motion:reduce){
+  .lp-dlbar-btn{transition:none;}
+}

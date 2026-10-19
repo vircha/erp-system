@@ -1,0 +1,40 @@
+#🔴 行尾统一：仓库必须跨平台可用。
+#   本机（Windows）开发，GitHub Actions（Linux）构建。
+#   若 shell 脚本被存成 CRLF，Linux 上执行会报 `\r: command not found` 直接失败。
+#   若 Kotlin / Java 被改成 CRLF，Linux 编译出的字节码行为可能与本机不一致。
+#   所以：**入库时统一存 LF，检出时由各平台自己决定**。
+
+* text=auto eol=lf
+
+# ---- 以下强制 LF，即使在 Windows 上也不转 CRLF ----
+*.sh          text eol=lf
+gradlew       text eol=lf
+# bat 只能在 Windows 上跑，保留 CRLF
+# （注意：.gitattributes 不支持行尾注释，必须独占一行）
+*.bat         text eol=crlf
+*.kt          text eol=lf
+*.kts         text eol=lf
+*.java        text eol=lf
+*.js          text eol=lf
+*.css         text eol=lf
+*.html        text eol=lf
+*.json        text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.md          text eol=lf
+*.xml         text eol=lf
+*.gradle      text eol=lf
+*.properties  text eol=lf
+*.sql         text eol=lf
+
+# ---- 二进制：禁止行尾转换 ----
+*.jks         binary
+*.keystore    binary
+*.jar         binary
+*.apk         binary
+*.png         binary
+*.jpg         binary
+*.gif         binary
+*.woff        binary
+*.woff2       binary
+*.ttf         binary

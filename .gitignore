@@ -1,0 +1,78 @@
+# ---- 依赖 ----
+node_modules/
+npm-debug.log*
+package-lock.json.bak
+
+# ---- 数据库（运行时生成，绝不入库）----
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+backup/
+
+# ---- TLS 证书与私钥 ----
+tls/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ---- Android 签名（必须本地保管）----
+*.jks
+*.keystore
+keystore.properties
+# 🔴 注意：路径必须写成 android-native/。原来写 android/ 完全没生效，
+#    .gradle/ 与 app/build/（含打进 APK 的真实域名 BuildConfig.java）差点被提交。
+android-native/local.properties
+android-native/.gradle/
+android-native/app/build/
+android-native/build/
+*.apk
+*.aab
+
+# ---- 环境变量 ----
+.env
+.env.local
+.env.*.local
+
+# ---- 真实业务数据（商业敏感，一律不入库）----
+*.xlsx
+*.xls
+price_*.json
+table_data.json
+_orderdata*.json
+
+# ---- 部署 / 运维脚本（含服务器凭据，不应开源）----
+deploy_*.py
+publish_*.py
+ssh*.py
+refresh_apk_url.sh
+backup_db.py
+ocr.ps1
+
+# ---- 测试与临时产物 ----
+_regress/
+_webtest/
+_tmp/
+_archive/
+ocr_prep/
+_regress.js
+_probe*.js
+_test_*.js
+_verify*.js
+_qr*.js
+*.log
+*.out
+*.png
+!docs/**/*.png
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

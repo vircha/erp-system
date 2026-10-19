@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      放行明文 HTTP 的域名白名单。默认留空 —— 生产环境应当只用 HTTPS。
+      🔴 每加一个明文域名，就等于承认这个域名上的登录密码和订单金额可被同网抓包窃听。
+      👉 需要临时对接自建/内网 HTTP 服务时，在此填入你自己的域名再删掉下面两行注释。
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">your-internal-host.example.com</domain>
+    </domain-config>
+    -->
+</network-security-config>

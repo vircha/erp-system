@@ -1,0 +1,14 @@
+{
+  "name": "erp-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "简单版多客户端 ERP：客户/门店、商品库存、销售开单、80mm 打单",
+  "scripts": {
+    "start": "node --experimental-sqlite server.js"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2"
+  }
+}

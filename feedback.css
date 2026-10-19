@@ -1,0 +1,138 @@
+/* ============================================================================
+   意见反馈模块样式（2026-10-15）
+   独立成文件，与 style.css 解耦；index.html 里额外引一行。
+   ============================================================================ */
+
+/* ---- 侧栏入口：与下载卡片同宽同风格，红点绝对定位在右上角 ---- */
+.fb-side-btn{
+  position:relative;display:flex;align-items:center;gap:10px;width:100%;
+  margin-top:8px;padding:10px;border:none;border-radius:12px;cursor:pointer;
+  background:rgba(255,255,255,.07);color:#fff;text-align:left;font-family:inherit;
+  transition:background .15s ease,transform .12s ease;
+}
+.fb-side-btn:hover{background:rgba(255,255,255,.13);transform:translateY(-1px);}
+.fb-side-btn:active{transform:translateY(0);}
+.fb-side-ico{font-size:20px;line-height:1;flex:none;}
+.fb-side-txt{display:flex;flex-direction:column;min-width:0;}
+.fb-side-txt b{font-size:14px;font-weight:600;line-height:1.3;}
+.fb-side-txt i{font-size:11px;font-style:normal;opacity:.62;line-height:1.3;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fb-dot{
+  position:absolute;top:6px;right:6px;min-width:17px;height:17px;padding:0 4px;
+  border-radius:9px;background:#fa5151;color:#fff;
+  font-size:11px;font-weight:700;line-height:17px;text-align:center;
+  box-shadow:0 0 0 2px #1f2b3a;
+}
+
+/* ---- 浮层 ---- */
+.fb-overlay{
+  position:fixed;inset:0;z-index:9000;background:rgba(15,22,32,.55);
+  display:flex;align-items:center;justify-content:center;padding:16px;
+  animation:fbFade .16s ease;
+}
+@keyframes fbFade{from{opacity:0}to{opacity:1}}
+.fb-modal{
+  width:100%;max-width:520px;max-height:88vh;display:flex;flex-direction:column;
+  background:#fff;border-radius:14px;overflow:hidden;
+  box-shadow:0 18px 48px rgba(0,0,0,.28);animation:fbPop .18s cubic-bezier(.2,.9,.3,1.2);
+}
+.fb-overlay.fb-wide .fb-modal{max-width:860px;}
+@keyframes fbPop{from{transform:translateY(14px) scale(.97);opacity:0}to{transform:none;opacity:1}}
+.fb-head{
+  display:flex;align-items:center;justify-content:space-between;flex:none;
+  padding:14px 16px;border-bottom:1px solid #e5e5e5;font-size:16px;font-weight:700;
+}
+.fb-head button{
+  width:30px;height:30px;border:none;border-radius:8px;background:none;
+  font-size:22px;line-height:1;color:#888;cursor:pointer;
+}
+.fb-head button:hover{background:#f2f3f5;color:#1a1a1a;}
+.fb-body{flex:1;overflow-y:auto;padding:16px;-webkit-overflow-scrolling:touch;}
+
+/* ---- 提交表单 ---- */
+.fb-types{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;}
+.fb-type{
+  display:flex;flex-direction:column;gap:2px;padding:10px 12px;text-align:left;
+  border:1.5px solid #e5e5e5;border-radius:10px;background:#fff;
+  cursor:pointer;font-family:inherit;transition:all .14s ease;
+}
+.fb-type b{font-size:14px;color:#1a1a1a;font-weight:600;}
+.fb-type i{font-size:11px;font-style:normal;color:#888;line-height:1.4;}
+.fb-type:hover{border-color:#b8e6cd;background:#f7fdfa;}
+.fb-type.on{border-color:#07c160;background:#f0fbf5;box-shadow:0 0 0 3px rgba(7,193,96,.12);}
+.fb-type.on b{color:#06a050;}
+.fb-hint{margin:8px 0 0;font-size:12px;color:#888;}
+.fb-lab{display:block;margin:14px 0 5px;font-size:13px;font-weight:600;color:#1a1a1a;}
+.fb-body textarea{
+  width:100%;padding:10px;border:1.5px solid #e5e5e5;border-radius:10px;
+  font-family:inherit;font-size:14px;line-height:1.6;resize:vertical;background:#fff;color:#1a1a1a;
+}
+.fb-body input{
+  width:100%;padding:10px;border:1.5px solid #e5e5e5;border-radius:10px;
+  font-family:inherit;font-size:14px;background:#fff;color:#1a1a1a;
+}
+.fb-body textarea:focus,.fb-body input:focus{outline:none;border-color:#07c160;}
+.fb-files input[type=file]{font-size:12px;color:#888;width:100%;}
+.fb-picked{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.fb-chip{
+  display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:16px;
+  background:#f0fbf5;color:#06a050;font-size:12px;max-width:100%;
+}
+.fb-chip i{font-style:normal;opacity:.6;font-size:11px;}
+.fb-chip b{cursor:pointer;font-size:14px;line-height:1;opacity:.6;}
+.fb-chip b:hover{opacity:1;color:#fa5151;}
+.fb-err{margin-top:8px;font-size:13px;color:#fa5151;min-height:1px;}
+.fb-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px;}
+.fb-note{margin:10px 0 0;font-size:11px;color:#888;line-height:1.5;}
+
+/* ---- 收件箱 ---- */
+.fb-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+.fb-chips{display:flex;gap:6px;flex-wrap:wrap;}
+.fb-sel{padding:7px 10px;border:1.5px solid #e5e5e5;border-radius:8px;font-family:inherit;font-size:13px;background:#fff;}
+.fb-chipbtn{
+  display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:16px;
+  border:1.5px solid #e5e5e5;background:#fff;color:#1a1a1a;
+  font-family:inherit;font-size:12px;cursor:pointer;transition:all .14s ease;
+}
+.fb-chipbtn:hover{border-color:#07c160;color:#06a050;}
+.fb-chipbtn.on{background:#07c160;border-color:#07c160;color:#fff;font-weight:600;}
+.fb-chipbtn i{font-style:normal;opacity:.6;font-size:11px;}
+.fb-atts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+
+.fb-card{
+  border:1px solid #e5e5e5;border-radius:12px;padding:12px 14px;margin-bottom:10px;
+  background:#fff;transition:box-shadow .15s ease;
+}
+.fb-card:hover{box-shadow:0 2px 10px rgba(0,0,0,.05);}
+.fb-card-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;}
+.fb-tag{font-size:12px;font-weight:600;color:#1a1a1a;}
+.fb-no{font-size:11px;color:#888;font-family:monospace;}
+.fb-time{margin-left:auto;font-size:11px;color:#888;}
+.fb-st-open,.fb-st-replied,.fb-st-closed{font-size:11px;font-weight:600;padding:2px 8px;border-radius:12px;}
+.fb-st-open{background:#fff7e6;color:#d97706;}
+.fb-st-replied{background:#e8f8ef;color:#059669;}
+.fb-st-closed{background:#f2f3f5;color:#888;}
+.fb-card-title{font-size:14px;font-weight:600;margin-bottom:4px;}
+.fb-card-body{font-size:13.5px;line-height:1.65;color:#333;word-break:break-word;}
+.fb-meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:11.5px;color:#888;}
+.fb-note-box{margin-top:8px;padding:8px 10px;border-radius:8px;background:#fff7e6;font-size:12px;color:#92400e;}
+.fb-replies{margin-top:10px;padding:10px;border-radius:10px;background:#f7f8fa;border-left:3px solid #07c160;}
+.fb-reply-item{display:flex;flex-direction:column;gap:2px;margin-bottom:8px;}
+.fb-reply-item:last-child{margin-bottom:0;}
+.fb-reply-item b{font-size:12px;color:#06a050;}
+.fb-reply-item span{font-size:13px;line-height:1.6;color:#333;white-space:pre-wrap;word-break:break-word;}
+.fb-reply-item i{font-style:normal;font-size:11px;color:#888;}
+.fb-replybox{margin-top:10px;padding:10px;border-radius:10px;background:#f7fdfa;border:1px solid #cdeede;}
+.fb-replybox textarea{
+  width:100%;padding:8px;border:1.5px solid #e5e5e5;border-radius:8px;
+  font-family:inherit;font-size:13.5px;line-height:1.6;resize:vertical;background:#fff;color:#1a1a1a;
+}
+.fb-ops{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-top:8px;border-top:1px dashed #e5e5e5;}
+.fb-loading,.fb-empty{padding:36px 12px;text-align:center;color:#888;font-size:13px;}
+
+@media (max-width:720px){
+  .fb-overlay{padding:0;align-items:flex-end;}
+  .fb-modal{max-width:none;border-radius:16px 16px 0 0;max-height:92vh;}
+  .fb-body{padding:14px;}
+  .fb-types{grid-template-columns:repeat(2,1fr);}
+}

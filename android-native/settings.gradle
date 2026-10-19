@@ -1,0 +1,68 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    plugins {
+        id 'com.android.application' version '8.13.0'
+        id 'org.jetbrains.kotlin.android' version '1.9.24'
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+// 🔴🔴 2026-10-17 服务器地址解析 + 构建期保险
+//
+//   放在 settings.gradle 而非 build.gradle，因为 Groovy 规定 plugins {} 前
+//   不允许有其它语句，那样就拿不到 pluginManagement。
+//
+// 🔴🔴 2026-10-19 修复「保险形同虚设」（本文件开过 source 脱敏副本，
+//    差点把占位域名打进生产 APK）：
+//
+//   事故链：
+//     ① 解析函数算出的是 local.properties 的真值 https://真实域名
+//     ② 但它赋给了 settings 的 ext.erpApiBase
+//     ③ build.gradle 里写的是 ${rootProject.ext.erpApiBase}
+//        —— rootProject 是 ProjectDescriptor，**没有 ext 属性**，
+//           Groovy 会退而取 project property，即 gradle.properties 里的
+//           erpApiBase=https://erp.example.com
+//     ④ 结果：settings 校验通过（以为没问题），APK 里却打进占位域名
+//
+//   教训：**「校验的值」和「使用的值」必须来自同一个对象**，
+//   否则校验形同虚设——比不校验更危险，因为它给人虚假的安全感。
+//
+//   现在：解析结果挂到 gradle.ext（唯一可跨 settings→project 传递的载体），
+//   build.gradle 只读这一个来源；并且两边都断言 example.com 一律中断构建。
+gradle.ext.erpApiBase = { ->
+    def local = new Properties()
+    def lp = new File(rootDir, 'local.properties')
+    if (lp.exists()) lp.withInputStream { local.load(it) }
+    def v = (local.getProperty('erpApiBase')
+             ?: (settings.hasProperty('erpApiBase') ? settings.erpApiBase : null)
+             ?: '').toString().trim()
+    if (!v) throw new GradleException(
+        "\n🔴 未配置服务器地址！\n" +
+        "   请在 local.properties（推荐，不入库）或 gradle.properties 里设置：\n" +
+        "       erpApiBase=https://你的域名\n")
+    // CI 演示构建豁免：GitHub Actions 没有真实服务器，允许打一个连不上后端的示例包。
+    // 只有显式 -PerpAllowExampleHost=true 才放行，本地正常构建不会误触发。
+    def allowExample = (settings.hasProperty('erpAllowExampleHost')
+                        && settings.erpAllowExampleHost.toString() == 'true')
+    if (v.contains('example.com') && !allowExample) throw new GradleException(
+        "\n🔴 erpApiBase 仍是 Gradle 模板占位符：${v}\n" +
+        "   example.com 不存在，打进 APK 会导致 App 完全无法登录。\n" +
+        "   请在 local.properties 里改成真实服务器地址后重新构建。\n" +
+        "   （CI 演示包可加 -PerpAllowExampleHost=true 显式放行）\n")
+    if (!v.startsWith('https://')) throw new GradleException(
+        "\n🔴 erpApiBase 必须是 https://（v4.7 起已废弃明文 HTTP）：${v}\n")
+    println "[erp]服务器地址 = ${v}  （来源：${lp.exists() && local.getProperty('erpApiBase') ? 'local.properties' : 'gradle.properties'}）"
+    return v
+}()
+
+rootProject.name = 'ErpNative'
+include ':app'

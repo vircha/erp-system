@@ -1,0 +1,524 @@
+:root{
+  --primary:#07c160;
+  --primary-dark:#06a050;
+  --bg:#f2f3f5;
+  --card:#fff;
+  --text:#1a1a1a;
+  --muted:#888;
+  --border:#e5e5e5;
+  --danger:#fa5151;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{margin:0;padding:0;height:100%;}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg);color:var(--text);font-size:16px;line-height:1.55;
+}
+.view{min-height:100vh;display:flex;flex-direction:column;}
+#app-view{display:flex;flex-direction:row;height:100vh;background:var(--bg);}
+.hidden{display:none !important;}
+
+/* 左侧导航 */
+.sidebar{width:220px;flex:none;background:#1f2b3a;color:#fff;display:flex;flex-direction:column;}
+.side-brand{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700;padding:16px 20px;color:#fff;border-bottom:1px solid rgba(255,255,255,.08);letter-spacing:.5px;}
+.side-logo{width:32px;height:32px;border-radius:8px;flex:none;display:block;box-shadow:0 2px 6px rgba(0,0,0,.25);}
+.sidebar nav{display:flex;flex-direction:column;padding:12px 0;flex:1;}
+.sidebar nav button{display:flex;align-items:center;gap:12px;padding:12px 20px;border:none;background:none;color:rgba(255,255,255,.72);font-size:15px;cursor:pointer;text-align:left;border-left:3px solid transparent;}
+.sidebar nav button .ti{font-size:20px;line-height:1;}
+.sidebar nav button .tl{font-weight:500;}
+.sidebar nav button:hover{background:rgba(255,255,255,.06);color:#fff;}
+.sidebar nav button.active{background:rgba(7,193,96,.16);color:#fff;border-left-color:var(--primary);}
+/* ============ 手机版下载（侧栏单入口） ============
+   经理 2026-10-15：顶栏那个「手机版」按钮与本卡片功能重复，已删除，
+   顶栏只留一个入口，避免同一个动作出现两处。 */
+.side-apk{padding:12px 14px 6px;border-top:1px solid rgba(255,255,255,.08);}
+.apk-btn{
+  display:flex;align-items:center;gap:10px;
+  padding:10px;border-radius:12px;text-decoration:none;
+  background:linear-gradient(135deg,#0bd06a,#049454);
+  box-shadow:0 4px 12px rgba(4,148,84,.35);
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+.apk-btn:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(4,148,84,.45);}
+.apk-btn:active{transform:translateY(0);}
+.apk-btn-ico{width:34px;height:34px;border-radius:9px;flex:none;background:#fff;}
+.apk-btn-txt{display:flex;flex-direction:column;line-height:1.25;min-width:0;flex:1;}
+.apk-btn-txt b{color:#fff;font-size:14px;font-weight:700;}
+.apk-btn-txt i{color:rgba(255,255,255,.82);font-size:11px;font-style:normal;white-space:nowrap;}
+.apk-qr{
+  width:44px;height:44px;flex:none;border-radius:6px;background:#fff;
+  background-repeat:no-repeat;background-position:center;background-size:100% 100%;
+}
+.apk-qr:empty{display:none;}
+
+.side-foot{padding:14px 20px;border-top:1px solid rgba(255,255,255,.08);}
+.side-foot #shop-name{display:block;font-size:13px;color:rgba(255,255,255,.8);margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.side-foot .link{color:rgba(255,255,255,.55);padding:0;font-size:14px;}
+.side-foot .link:hover{color:#fff;}
+
+/* 主区 */
+.main{flex:1;display:flex;flex-direction:column;min-width:0;}
+.topbar{display:flex;align-items:center;gap:12px;padding:12px 22px;background:#fff;border-bottom:1px solid var(--border);}
+.topbar #today-stat{color:var(--muted);flex:1;font-size:14px;}
+.topbar .link{color:var(--primary);}
+.muted{color:var(--muted);font-size:14px;}
+.err{color:var(--danger);font-size:14px;min-height:18px;margin:6px 0 0;}
+.link{background:none;border:none;color:var(--primary);font-size:15px;cursor:pointer;padding:6px 10px;}
+
+/* 登录页：版式已重做为左右分屏 + 动态极光，样式全部搬到 css/login.css。
+   这里只保留「登录后进入主应用」所必需的通用件，.login-card 相关规则已废弃。 */
+#login-view{background:#0b1220;}
+.btn-primary{width:100%;padding:14px;border:none;border-radius:10px;background:var(--primary);color:#fff;font-size:17px;margin-top:14px;cursor:pointer;}
+.btn-primary:active{background:var(--primary-dark);}
+
+/* 主体 */
+#page{flex:1;padding:20px 24px;overflow-y:auto;}
+.page-wrap{max-width:1180px;margin:0 auto;}
+.card{background:var(--card);border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.04);}
+.row{display:flex;align-items:center;gap:8px;}
+.row.between{justify-content:space-between;}
+.section-title{font-size:15px;font-weight:600;margin:4px 2px 8px;color:#333;}
+.sub-title{font-size:14px;font-weight:600;color:#555;margin:16px 0 6px;}
+/* 设置页：可折叠分区（手风琴） */
+.collapse-sec{background:var(--card);border-radius:12px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04);}
+.sec-head{width:100%;display:flex;align-items:center;justify-content:space-between;padding:13px 14px;border:none;background:none;cursor:pointer;font-size:15px;font-weight:600;color:#333;}
+.sec-head:active{background:#f7f7f7;}
+.sec-arrow{transition:transform .2s;color:var(--muted);font-size:13px;}
+.collapse-sec.open .sec-arrow{transform:rotate(90deg);}
+.sec-body{padding:2px 14px 16px;display:none;}
+.collapse-sec.open .sec-body{display:block;animation:secIn .18s ease;}
+@keyframes secIn{from{opacity:.4}to{opacity:1}}
+.btn-sm{padding:9px 14px;border:none;border-radius:8px;background:var(--primary);color:#fff;font-size:14px;cursor:pointer;}
+.btn-sm.gray{background:#eee;color:#333;}
+.btn-sm.danger{background:var(--danger);}
+input,select{width:100%;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:16px;background:#fff;}
+label{display:block;font-size:14px;color:var(--muted);margin:12px 0 4px;}
+
+/* 底部 tab 已移除：导航改为左侧 sidebar */
+
+/* 开单 */
+.sale-customer{margin-bottom:10px;}
+/* ---- 开单页顶部：门店 / 日期 / 表格入口 并排一行 ----
+   🔴 用 grid 不用 flex+wrap：wrap 下一个放不下就整块跳下一行，反而更占地方。
+      grid-template-columns 的 1.4/1/1.5 是按内容宽度分配的（门店下拉最长、表格入口有两个按钮）。
+      align-items:stretch（默认）保证三块等高，短的那块不会留出空白。 */
+.sale-top{display:grid;grid-template-columns:1.4fr 1fr 1.5fr;gap:10px;margin-bottom:12px;}
+.sale-top .card{margin:0;min-width:0;display:flex;flex-direction:column;}
+.sale-top .card>label{margin-bottom:4px;}
+/* 🔴 绝不给这行写 flex-wrap:wrap —— 一个放不下就整行跳下、整行被撑高（同「按钮行排版铁律」）。 */
+.sale-top .btn-sm{height:38px;line-height:1;}
+/* ---- 退货编辑弹窗：逐行填退货数量，只退选中的商品 ---- */
+.ret-line{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);}
+.ret-line:last-child{border-bottom:none;}
+.ret-line.is-done{opacity:.55;}
+/* 🔴 别给这行写 flex-wrap：数量框放不下就整行跳下、整行被撑高。 */
+.ret-sel{flex:none;display:flex;align-items:center;cursor:pointer;padding:2px;}
+/* 必须显式覆盖通用 input 规则，否则 checkbox 会被撑变形 */
+.ret-sel input{width:18px;height:18px;min-width:18px;margin:0;padding:0;accent-color:var(--danger);cursor:pointer;}
+.ret-q{width:74px;text-align:center;padding:7px 2px;flex:none;}
+.sale-item{border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
+.sale-item .info{flex:1;min-width:0;}
+.sale-item .info .nm{font-weight:500;}
+.sale-item .info .sub{font-size:12px;color:var(--muted);}
+.sale-item input{width:64px;text-align:center;padding:6px;}
+/* 明细行的「单价/折扣/数量/小计/删」字段组 */
+.sale-item .fields{display:flex;align-items:center;gap:6px;flex:none;}
+.sale-item .fields .fd{display:flex;flex-direction:column;align-items:center;gap:2px;margin:0;}
+.sale-item .fields .fd>span{font-size:11px;color:var(--muted);line-height:1;}
+.sale-item .fields .fd input{width:64px;text-align:center;padding:6px;}
+.sale-item .fields .fd input[data-pi]{width:74px;}
+.sale-item .fields .fd input[data-di]{width:60px;}
+.sale-item .fields .fd input[data-i]{width:56px;}
+.sale-item .fields .line-amt{min-width:62px;}
+.sale-item .fields .line-amt b{font-size:14px;font-variant-numeric:tabular-nums;}
+.sale-item .fields .line-amt b.is-disc{color:#f5a524;}
+.sale-item.has-disc{border-color:#f5a524;background:#fffdf5;}
+.sale-item .fields .btn-sm.danger{padding:6px 8px;align-self:flex-end;}
+/* ---- 开单行勾选框：只用于「批量设单品折扣」，让折扣商品与原价商品能同在一张单 ----
+   🔴 上面 `.sale-item input{width:64px;text-align:center;padding:6px}` 会把 checkbox
+   也撑成 64px 宽，必须显式覆盖，否则勾选框会变形且点击区域偏移。 */
+.sale-sel{flex:none;display:flex;align-items:center;cursor:pointer;user-select:none;padding:4px;}
+.sale-sel input{width:18px;height:18px;min-width:18px;margin:0;padding:0;accent-color:#f5a524;cursor:pointer;}
+.sale-sel:hover{background:#fff7e6;border-radius:6px;}
+.sale-total{position:sticky;bottom:0;background:#fff;border-top:1px solid var(--border);padding:12px;display:flex;align-items:center;justify-content:space-between;font-size:18px;font-weight:700;}
+.sale-total .amt{color:var(--danger);}
+.search-result{max-height:220px;overflow-y:auto;}
+
+/* 列表 */
+.list-item{background:var(--card);border-radius:10px;padding:12px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.04);}
+.list-item .top{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.list-item .nm{font-weight:600;}
+.list-item .meta{font-size:13px;color:var(--muted);margin-top:4px;}
+/* 多选模式：复选框不要继承 input{width:100%}，行内垂直居中 + 选中态 */
+.list-item.multi{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;}
+.list-item.multi input[type=checkbox]{width:18px;height:18px;min-width:18px;padding:0;margin:0;flex:none;border:none;background:none;accent-color:var(--primary);cursor:pointer;}
+.list-item.multi .top{align-items:flex-start;}
+.list-item.sel{box-shadow:0 0 0 2px var(--primary) inset;background:#f2fbf6;}
+.btn-sm[disabled]{opacity:.45;cursor:not-allowed;}
+/* 搜索命中高亮 */
+mark{background:#fff2a8;color:inherit;padding:0 1px;border-radius:2px;}
+.low{color:var(--danger);font-weight:600;}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;background:#e8f8ee;color:var(--primary);}
+
+/* 弹窗 */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px;}
+.modal{background:#fff;border-radius:12px;width:100%;max-width:420px;max-height:86vh;display:flex;flex-direction:column;}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--border);font-weight:600;}
+.modal-body{padding:8px 16px 16px;overflow-y:auto;}
+
+/* 小票 */
+.print-wrap{background:#fff;border-radius:10px;max-width:340px;width:100%;padding:12px;max-height:90vh;overflow-y:auto;}
+.receipt{width:var(--rc-mm,80mm);max-width:100%;margin:0 auto;font-family:"Courier New",monospace;font-size:13px;color:#000;background:#fff;padding:6px 2px;}
+.receipt .center{text-align:center;}
+.receipt .line{display:flex;justify-content:space-between;}
+/* 窄纸（58mm）时左列只有 18 列，13 位条码 + 数字列放不下会溢出裁掉末位。
+   min-width:0 允许 flex 子项收缩，word-break 允许在数字中间断行，两条一起防截断。 */
+.receipt .line>span:first-child{min-width:0;overflow-wrap:anywhere;}
+.receipt .sep{border-top:1px dashed #000;margin:6px 0;}
+.receipt .small{font-size:11px;}
+.overlay-actions{display:flex;gap:10px;margin-top:12px;}
+.overlay-actions .btn-primary{flex:1;margin-top:0;}
+.overlay-actions .btn-sm{flex:1;margin-top:0;}
+.overlay-actions .link{flex:0 0 auto;}
+
+/* 小票底部签收留白：2cm（经理要求，方便客户手写签名） */
+.receipt .sign-tail{height:var(--rc-tail,2cm);}
+
+/* toast */
+.toast{position:fixed;left:50%;top:40%;transform:translateX(-50%);background:rgba(0,0,0,.8);color:#fff;padding:10px 18px;border-radius:8px;z-index:99;font-size:14px;}
+
+/* 管家婆风格商品表格 */
+.erp-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;}
+.erp-toolbar input{flex:1;min-width:150px;}
+.erp-tools{display:flex;gap:6px;flex-wrap:wrap;}
+.erp-table{background:var(--card);border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04);}
+.erp-scroll{overflow-x:auto;}
+.erp-thead,.erp-row{display:grid;grid-template-columns:1.1fr 2fr 1.7fr 1fr .8fr 1.5fr;gap:6px;align-items:center;padding:10px 12px;}
+.erp-thead{background:#f7f8fa;font-size:12px;font-weight:600;color:#666;border-bottom:1px solid var(--border);}
+.erp-row{border-bottom:1px solid #f4f4f4;font-size:13px;}
+.erp-row:last-child{border-bottom:none;}
+.erp-row .c-name{font-weight:600;}
+.erp-row .c-qty{font-weight:700;color:var(--primary);}
+.erp-row .c-qty.low{color:var(--danger);}
+.erp-row .c-act{display:flex;gap:4px;}
+.erp-row .c-act .btn-sm{padding:5px 9px;font-size:12px;}
+.c-check{display:none;align-items:center;justify-content:center;}
+.erp-table.multi .c-check{display:flex;}
+.erp-table.multi .erp-thead,.erp-table.multi .erp-row{grid-template-columns:30px 1.1fr 2fr 1.7fr 1fr .8fr 1.5fr;}
+.erp-row.sel{background:#eef4ff;}
+.batch-bar{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#f7f8fa;border:1px solid var(--border);border-top:none;font-size:13px;}
+.batch-bar .spacer{flex:1;}
+.sel-all{display:flex;align-items:center;gap:6px;cursor:pointer;}
+@media (max-width:480px){
+  .erp-thead,.erp-row{grid-template-columns:1.4fr 1.7fr 1fr .9fr 1.4fr;padding:8px 10px;font-size:12px;}
+  .erp-thead .c-code,.erp-row .c-code{display:none;}
+  .erp-table.multi .erp-thead,.erp-table.multi .erp-row{grid-template-columns:30px 1.4fr 1.7fr 1fr .9fr 1.4fr;}
+  .erp-table.multi .c-code{display:none;}
+}
+
+/* 🔴🔴 2026-10-17 经理反馈「打印订单狂出纸、而且是空白的」。
+   根因：原来用 visibility:hidden 隐藏整页。visibility 只是「看不见」，
+   元素仍然照常参与布局、照常撑出文档流高度 —— 侧栏 + 主区 + 所有卡片
+   会把文档撑到几十页高，打印机就一张张吐空白纸。
+   正解：用 display:none 真正把它们从文档流里拿掉，只留要打的那一个浮层。
+   🔴 另一个坑：#print-overlay / #print-products 带 .hidden 类，
+   而 .hidden{display:none!important} 只有类优先级（0-1-0）。
+   若这里写 #print-overlay{display:block!important}（1-0-0）会反过来
+   把「没打开的浮层」也强行显示 → 多打一张空白页。
+   所以必须加 :not(.hidden)，只显示当前真正打开的那个。 */
+@page{margin:0;}
+@media print{
+  html,body{height:auto !important;min-height:0 !important;overflow:visible !important;}
+  /* 🔴 .view{min-height:100vh} 与 #app-view{height:100vh} 在打印时仍会留下整屏高度，
+     打印机会按整屏高度分页 → 尾部多吐半张空白纸。打印态一并放开。 */
+  .view,#app-view{min-height:0 !important;height:auto !important;}
+  body{background:#fff !important;}
+  /* 真正移出文档流：这一步才是「不出空白纸」的关键 */
+  body > *{display:none !important;}
+  /* 只放行「当前打开的」打印浮层 + 预览打印用的图 */
+  #print-overlay:not(.hidden),#print-products:not(.hidden){
+    display:block !important;position:static !important;inset:auto !important;
+    background:#fff !important;padding:0 !important;margin:0 !important;
+    overflow:visible !important;}
+  /* 🔴 .print-wrap 屏幕上是 max-height:90vh + overflow-y:auto，
+     打印时若不放开，小票会被裁在一屏内、后面全丢。 */
+  .print-wrap{
+    max-width:none !important;max-height:none !important;height:auto !important;
+    overflow:visible !important;box-shadow:none !important;border-radius:0 !important;
+    background:#fff !important;margin:0 auto !important;padding:0 !important;}
+  .receipt{width:var(--rc-mm,80mm) !important;max-width:none !important;
+    margin:0 auto !important;page-break-inside:avoid;}
+  /* 留白高度由模板决定（renderHtml 已写内联 height），这里只兜底 */
+  .receipt .sign-tail{height:var(--rc-tail,2cm) !important;}
+  .overlay-actions{display:none !important;}
+  /* 预览浮层本身不打印：它只是「看效果」的，真打印走 #rc-print-img */
+  #rc-overlay{display:none !important;}
+  /* 预览打印路径：canvas 转 img 后 window.print()，这条要放行 */
+  #rc-print-img{display:block !important;width:var(--rc-mm,80mm) !important;
+    max-width:none !important;margin:0 auto !important;page-break-inside:avoid;}
+}
+
+/* ---- 单品优惠金额（2026-10-17）：每行让人一眼看到「这个商品省了多少」 ---- */
+/* 🔴 原来每行只有折后小计，`.sale-item.has-disc` 只把整行描个黄边 + 小计变橙色，
+   数字上看不出到底让了多少钱；汇总那行「单品折扣已省」又埋在页面最底部的
+   「整单折扣」卡片里，改完价得往下滚才找得到。 */
+.sale-item .fields .fd em.save{
+  font-style:normal;font-size:11px;line-height:1.2;color:#f5a524;
+  font-variant-numeric:tabular-nums;white-space:nowrap;margin-top:1px;}
+/* 🔴 「省」放在折扣输入框正下方，不要放小计下面 ——
+   .sale-total{position:sticky;bottom:0} 吸在底部，会把小计下方那行盖住，
+   业务员滚到底也看不见，等于没显示。放在 fields 区内部就不会被压。 */
+#sale-disc-sum{line-height:1.65;}
+
+/* 开单：单价/数量双输入（含单品折扣，2026-10-14 加） */
+.sale-item input[data-pi]{width:82px;padding:6px;}
+.sale-item input[data-i]{width:60px;padding:6px;}
+.sale-item input[data-di]{width:60px;padding:6px;}
+
+/* 数据分析表格 */
+.tbl{width:100%;border-collapse:collapse;font-size:13px;}
+.tbl th,.tbl td{padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap;}
+.tbl thead th{background:#f7f8fa;color:#666;font-weight:600;font-size:12px;}
+.tbl tbody tr:hover{background:#fafbfc;}
+
+/* ========== 违规提醒横幅 ========== */
+.violation-banner{
+  position:fixed;top:0;left:0;right:0;z-index:9999;
+  pointer-events:none;padding:10px 12px;
+}
+.violation-banner .vb-inner{
+  pointer-events:auto;
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  max-width:1100px;margin:0 auto;
+  background:#fffbeb;border:1px solid #f59e0b;border-left:4px solid #f59e0b;
+  border-radius:10px;padding:11px 14px;
+  box-shadow:0 6px 20px rgba(0,0,0,.14);
+  font-size:14px;line-height:1.5;color:#78350f;
+}
+.violation-banner .vb-inner b{color:#92400e;font-weight:700;white-space:nowrap;}
+.violation-banner .vb-inner span{flex:1;min-width:240px;}
+.violation-banner .vb-inner em{
+  font-style:normal;font-weight:700;color:#dc2626;
+  font-size:15px;padding:0 2px;
+}
+.vb-fix{
+  pointer-events:auto;cursor:pointer;white-space:nowrap;
+  background:var(--danger);color:#fff;border:none;
+  border-radius:8px;padding:7px 14px;font-size:14px;font-weight:600;
+}
+.vb-fix:hover{filter:brightness(1.08);}
+
+/* ========== 平台管理页 ========== */
+.admin-stat-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;}
+.admin-stat{
+  flex:1;min-width:88px;text-align:center;
+  background:#f7f8fa;border-radius:10px;padding:12px 6px;
+}
+.admin-stat .as-n{font-size:22px;font-weight:700;line-height:1.2;}
+.admin-stat .as-l{font-size:12px;color:var(--muted);margin-top:3px;}
+
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px;}
+.admin-table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px;}
+.admin-table th,.admin-table td{
+  padding:9px 8px;border-bottom:1px solid var(--border);
+  text-align:left;vertical-align:middle;white-space:nowrap;
+}
+.admin-table thead th{background:#f7f8fa;color:#666;font-weight:600;font-size:12px;}
+.admin-table tbody tr:hover{background:#fafbfc;}
+.admin-table .btn-sm{margin-right:6px;padding:5px 11px;font-size:12px;}
+
+.tag-admin,.tag-wl{
+  display:inline-block;font-size:11px;line-height:1.6;
+  padding:1px 7px;border-radius:20px;margin-right:4px;font-weight:600;
+}
+.tag-admin{background:#ede9fe;color:#6d28d9;}
+.tag-wl{background:#cffafe;color:#0e7490;}
+
+@media (max-width:720px){
+  .violation-banner{padding:8px;}
+  .violation-banner .vb-inner{font-size:13px;padding:9px 11px;gap:8px;}
+  .vb-fix{padding:6px 12px;font-size:13px;}
+
+  /* ---- 开单页顶部：手机上竖排（手机上并排会把门店下拉压到点不动） ---- */
+  .sale-top{grid-template-columns:1fr;gap:8px;}
+  .sale-top .btn-sm{height:40px;}
+  /* 🔴 侧栏不折叠，主区在 390px 视口只剩 ~170px，两个按钮横排会被压到文字全溢出
+     （实测 clientW=43 / scrollW=121）。改成竖排，各占满整行。 */
+  .sale-top .card:last-child .row{flex-direction:column;gap:6px;}
+  .sale-top .card:last-child .btn-sm{width:100%;}
+
+  /* ---- 开单明细：手机上改成「商品名一行 + 单价/折扣/数量/小计一行」两行式，
+         否则四个输入框挤在一行会被压成几十像素宽，根本没法点 ---- */
+  .sale-item{flex-direction:column;align-items:stretch;gap:8px;padding:10px;}
+  .sale-item .info{width:100%;}
+  .sale-item .fields{width:100%;display:grid;grid-template-columns:repeat(4,1fr) auto;gap:6px;align-items:end;}
+  .sale-item .fields .fd input,
+  .sale-item .fields .fd input[data-pi],
+  .sale-item .fields .fd input[data-di],
+  .sale-item .fields .fd input[data-i]{width:100%;min-width:0;padding:8px 2px;font-size:15px;}
+  .sale-item .fields .line-amt{min-width:0;text-align:center;}
+  .sale-item .fields .line-amt b{font-size:15px;}
+  .sale-item .fields .btn-sm.danger{width:100%;padding:9px 0;align-self:stretch;}
+  /* 手机上勾选框绝对定位到左上角，否则 column 布局会让它独占一整行、挤掉商品名 */
+  .sale-item{position:relative;padding-left:34px;}
+  .sale-sel{position:absolute;left:6px;top:8px;padding:6px;}
+  /* 批量折扣按钮换行好点 */
+  #sale-quickdisc .row{gap:6px;}
+  #sale-quickdisc .qd{padding:7px 10px;}
+  #qd-custom{width:100% !important;}
+}
+
+/* iPhone SE 等超窄屏（<=380px）：字段组三列布局，
+   保证输入框不至于被压到点不动，同时小计独占一段更好读 */
+@media (max-width:380px){
+  .sale-item .fields{grid-template-columns:repeat(3,1fr);gap:8px 6px;}
+  .sale-item .fields .line-amt{grid-column:span 2;flex-direction:row;align-items:center;justify-content:flex-end;gap:6px;}
+  .sale-item .fields .btn-sm.danger{grid-column:span 1;}
+  .sale-item .fields .fd input,
+  .sale-item .fields .fd input[data-pi],
+  .sale-item .fields .fd input[data-di],
+  .sale-item .fields .fd input[data-i]{padding:9px 2px;}
+}
+
+/* ================= 应收应付 / 报表中心（2026-10-17） ================= */
+/* 账期超期门店：整行淡红底，一眼扫到谁欠久了 */
+.ar-overdue{
+  background:rgba(226,75,74,.05);
+  border-left:3px solid var(--danger);
+}
+.ar-badge{
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  flex-wrap:wrap;
+  margin-top:6px;
+  padding:6px 9px;
+  border-radius:6px;
+  background:rgba(226,75,74,.07);
+  font-size:12px;
+}
+.ar-badge b{color:var(--danger);font-size:13px;}
+.ar-badge span{color:var(--text-2,#888);}
+.ar-badge em{color:var(--danger);font-style:normal;font-weight:600;}
+.ar-badge.ar-clear{background:rgba(31,158,117,.09);}
+.ar-badge.ar-clear b{color:var(--primary);}
+
+/* 订单列表的结算状态小标签 */
+.ar-tag{
+  display:inline-block;
+  margin-left:6px;
+  padding:1px 6px;
+  min-height:20px;
+  line-height:18px;
+  box-sizing:border-box;
+  border-radius:4px;
+  font-size:11px;
+  font-weight:400;
+  vertical-align:middle;
+}
+.ar-tag.none{background:rgba(226,75,74,.12);color:var(--danger);}
+.ar-tag.part{background:rgba(239,159,39,.16);color:#a9690a;}
+.ar-tag.ok{background:rgba(31,158,117,.13);color:var(--primary);}
+
+/* 收款弹窗：超期未结的行标红 */
+.ret-line.is-overdue{background:rgba(226,75,74,.05);}
+.ret-line.is-overdue input{border-color:var(--danger) !important;}
+
+/* 报表中心：分组页签 */
+.rp-tabs{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;}
+.rp-grp{
+  flex:1 1 190px;
+  min-width:0;
+  background:var(--card,#fff);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg,12px);
+  padding:10px;
+}
+.rp-grp-t{font-size:12px;color:var(--text-2,#888);margin-bottom:7px;}
+.rp-grp-b{display:flex;flex-wrap:wrap;gap:6px;}
+.rp-tab{
+  flex:1 1 auto;
+  min-width:0;
+  height:32px;
+  padding:0 8px;
+  border:1px solid var(--border);
+  border-radius:7px;
+  background:transparent;
+  color:var(--text-1,#333);
+  font-size:12px;
+  cursor:pointer;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.rp-tab:hover{border-color:var(--primary);}
+.rp-tab.active{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:500;}
+
+/* 账龄四档 */
+.rp-aging{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}
+.rp-ab{
+  padding:10px;
+  border:1px solid var(--border);
+  border-radius:var(--radius-md,8px);
+  text-align:center;
+}
+.rp-ab.is-bad{background:rgba(226,75,74,.07);border-color:rgba(226,75,74,.25);}
+
+/* 收款流水条目 */
+.ar-flow{
+  padding:9px 0;
+  border-bottom:1px solid var(--border);
+}
+.ar-flow:last-child{border-bottom:none;}
+.ar-flow .top{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+.ar-flow .nm{font-size:13px;font-weight:500;}
+.ar-flow .meta{font-size:11px;color:var(--text-2,#888);margin-top:2px;}
+
+@media (max-width:720px){
+  /* 🔴🔴 手机端侧栏改为「顶部横向滚动条」。
+     原来侧栏固定 220px 且没有移动端规则 → 390px 视口下 MAIN 只剩 170px，
+     卡片被挤到内容溢出（scrollWidth>clientWidth）。导航项不折行、横向滑动。 */
+  #app-view{flex-direction:column;}
+  .sidebar{
+    width:100%;
+    flex:none;
+    flex-direction:row;
+    align-items:center;
+    overflow-x:auto;
+    overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+  }
+  .sidebar::-webkit-scrollbar{display:none;}
+  .side-brand{
+    padding:10px 12px;
+    font-size:15px;
+    border-bottom:none;
+    border-right:1px solid rgba(255,255,255,.08);
+    flex:none;
+  }
+  .side-logo{width:24px;height:24px;border-radius:6px;}
+  .sidebar nav{
+    flex-direction:row;
+    padding:0;
+    flex:none;
+  }
+  .sidebar nav button{
+    padding:10px 12px;
+    font-size:13px;
+    border-left:none;
+    border-bottom:3px solid transparent;
+    white-space:nowrap;
+    flex:none;
+    gap:6px;
+  }
+  .sidebar nav button .ti{font-size:16px;}
+  .sidebar nav button.active{border-left-color:transparent;border-bottom-color:var(--primary);}
+
+  /* 报表页签手机上两列，别挤成一坨 */
+  .rp-grp{flex:1 1 100%;}
+  .rp-ab{padding:8px 4px;}
+  .rp-ab>div:nth-child(2){font-size:15px;}
+  /* 欠款徽章手机上竖排，别挤成一团 */
+  .ar-badge{flex-direction:column;align-items:flex-start;gap:2px;}
+}

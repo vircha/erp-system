@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="updates" path="updates/" />
+    <external-cache-path name="ext_updates" path="updates/" />
+    <!-- 下载目录改为外部私有目录（app 专属，无需存储权限，也不会像 cache 那样被系统清理） -->
+    <external-files-path name="downloads" path="Download/updates/" />
+    <external-files-path name="efiles" path="." />
+</paths>
