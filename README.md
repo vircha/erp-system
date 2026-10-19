@@ -166,93 +166,119 @@ node server.js
 
 ## 手机版（原生 Android）
 
-源码在 [`android-native/`](android-native/)，Kotlin + Jetpack Compose，min SDK 24，arm64-v8a。
+源码在 [`android-native/`](android-native/)，Kotlin + Jetpack Compose，min SDK 24。
+
+### 🔴 服务器地址是「本机注入」的，不在仓库里
+
+仓库里的 `gradle.properties` 只有占位符 `https://erp.example.com`。**这是故意的** ——
+真实域名写进入库文件，任何人 clone 一下就知道了。
+
+真实地址走这条链路，全程不进仓库：
+
+```
+build.local.env               ← 你本机填，已 gitignore
+      ↓  build-apk.sh 读取
+android-native/local.properties ← 已 gitignore
+      ↓  settings.gradle 解析 + 校验
+BuildConfig.API_BASE           ← 打进 APK
+```
+
+### 一键打包
+
+```bash
+# 第一次：照着模板填地址和签名
+cp build.local.env.example build.local.env
+#   编辑 build.local.env，填 ERP_API_BASE 和签名四项
+
+# 之后：一键出包
+./build-apk.sh
+```
+
+Windows 上直接双击 **`build-apk.bat`**（会自动找 Git Bash 转交）。
+
+脚本做的事：
+
+| 步骤 | 说明 |
+|---|---|
+| 读配置 | 按 systemd `EnvironmentFile` 规则解析，密码里有 `#` 或空格也不会被吃掉 |
+| 校验地址 | 必须是 `https://`，且不能是 `example.com` —— 不合格直接停 |
+| 写 local.properties | 注入地址与 SDK 路径 |
+| 配签名 | 有密钥出 release 包，没有则退回 debug 包并明确告警 |
+| 构建 | `assembleRelease` / `assembleDebug` |
+| **终检** | 解包 dex，确认**含**目标域名、**不含** `example.com` |
+| 输出 | `dist/erp-app-<版本>-<versionCode>.apk` |
+
+最后那步终检很关键：地址注入失败会产出一个「装得上但连不上服务器」的包，
+用户只会看到「网络错误」，根本想不到是打包时配错了。
+
+> 🔴 别用 `strings` 扫 dex 判断域名 —— Git Bash 和很多精简容器没有这个命令，
+> 而 `strings 不存在 | grep -q xxx` 会因为「输出为空」**静默判为通过**。
+> 本仓库的脚本用 `grep -a` 直接扫二进制。
+
+### 手动构建（不想用脚本）
 
 ```bash
 cd android-native
-
-# 1. 填服务器地址
-#    推荐写local.properties（已被 .gitignore 排除，不会误提交）：
-#        erpApiBase=https://你的域名
-#    也可写gradle.properties，但那个文件是要入库的，别把真实域名提交上去。
-echo "erpApiBase=https://你的域名" > local.properties
-
-# 2. 配置签名（不上架可跳过，会自动回退debug 签名）
-cp keystore.properties.example keystore.properties
-# 然后填写 keystore 绝对路径与密码
-
-# 3. 构建
+echo "erpApiBase=https://你的域名" > local.properties   # 已 gitignore
+cp keystore.properties.example keystore.properties      # 填密钥路径与口令
 ./gradlew assembleRelease
 ```
 
-> `gradle.properties` 里预置的 `erpApiBase=https://erp.example.com` 是**故意留的占位符**，
-> 构建时会直接报错中断——因为占位域名打进 APK 会让 App 完全无法登录，
-> 且这种错要等到装到真机、连不上服务器才会发现。宁可构建失败。
-
-> 如果你在 GitHub Actions 里看到 `example.com 仍是模板占位符` 的报错，那是**故意的**：
-> 说明仓库还没配置 `ERP_API_BASE` 这个 Secret。配置方法见下文「自动发布 APK」。
+> `gradle.properties` 里的占位符会让构建**直接报错中断**。这是保护措施：
+> 占位域名打进 APK 会让 App 完全无法登录，而这种错要等装到真机才暴露。
+> 宁可构建失败。
 
 ### 🔴 签名密钥须知
 
-`keystore.properties` **已被 `.gitignore` 排除，永远不要提交它**。它的内容等于你App 的"身份证明" ——
-泄露后任何人都能伪造出与你一模一样的 App 覆盖安装，用户无法分辨。
+`keystore.properties` 与 `build.local.env` **都已 gitignore，永远不要提交**。
+它们的内容等于你 App 的「身份证明」—— 泄露后任何人都能伪造出与你一模一样的
+App 覆盖安装，用户分辨不出来。
 
-另外：应用商店上架后**永远不要更换这套密钥**，换了会导致无法覆盖升级，只能让用户卸载重装（丢本地数据）。
+创建密钥（只需一次）：
 
-## 自动发布 APK（GitHub Actions）
+```bash
+keytool -genkeypair -v -keystore release-key.jks   -alias my-erp -keyalg RSA -keysize 2048 -validity 10000
+```
+
+生成后**立刻备份到离线介质或密码管理器**。这台机器坏掉又没有备份，
+就等于永远无法更新已发布的 App。应用上架后**永远不要更换密钥**，
+换了用户只能卸载重装（丢本地数据）。
+
+## 自动构建演示包（GitHub Actions）
 
 仓库内置 [`.github/workflows/build-apk.yml`](.github/workflows/build-apk.yml)：
 
-- **推送 `v*` 标签** → 自动构建 APK → 自动创建 GitHub Release 并挂载 APK
+- **推送 `v*` 标签** → 自动构建 → 自动创建 GitHub Release 并挂载 APK
 - 仓库页面也可以手动触发（Actions → 该工作流 → Run workflow）
 
-### 需要配置的仓库 Secrets
+**产出的是「演示包」**：连的是占位域名 `erp.example.com`，装得上、界面能看，
+但**连不上任何真实服务器**。它存在的意义是验证「代码能编译、CI 链路通」，
+不是给你日常使用的。
 
-`Settings → Secrets and variables → Actions → New repository secret`
+> **为什么不在这里出正式包？**
+> 只要仓库是公开的，Release 里的 APK 谁都能下载。而 APK 里必然带着服务器地址 ——
+> 就算用 Secret 藏起来，构建时也会被打进 `BuildConfig.API_BASE`，
+> 下载 APK 解包就能读出来。所以**正式包一律在你本机用 `build-apk.sh` 出**。
 
-| Secret | 必填 | 说明 |
-|---|---|---|
-| `ERP_API_BASE` | **是** | 你的服务器地址，如 `https://erp.example.com`。不配则构建会以「占位符」为由失败 |
-| `ANDROID_KEYSTORE_BASE64` | 否 | 签名密钥的base64（`base64 -i release-key.jks -o ks.b64`）。配了就出 release 包 |
-| `ANDROID_KEYSTORE_PASSWORD` | 配了 KS 才需 | 密钥库密码 |
-| `ANDROID_KEY_ALIAS` | 配了 KS 才需 | 密钥别名 |
-| `ANDROID_KEY_PASSWORD` | 配了 KS 才需 | 别名密码 |
+### 想让 CI 出正式包（仅限私有仓库）
 
-**签名密钥可选**：不配则产出 **debug 包**（能装、能用，但性能与体积吃亏，且不能上架）。
+如果仓库是**私有**的，可以把下面这些配成 Secret，CI 就能出正式的：
 
-```bash
-# 本地推送第一个版本
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-> **release 包必须用你自己的签名密钥**，否则每次构建签名都不同，用户无法覆盖升级。
-> 一旦对外发布过某个版本，密钥就不能再换了（见上文「签名密钥须知」）。
-
-### 🔴 公开仓库放签名密钥的风险（请务必读完再决定）
-
-签名密钥是这份系统里**最敏感的一项**。GitHub Secrets 是加密存储的，任何人（包括访问你仓库的
-陌生人）都看不到明文；但**能触发构建的人，可以让构建过程把密钥写进日志或产物里**。
-
-也就是说：签名密钥一旦配进 Secrets，**仓库的写权限 = APK 的签名权限**。拿到密钥的人
-可以伪造一个「官方更新包」发给你的用户，手机装上去不会有任何提示。
-
-如果你打算把仓库设为公开，又想保留自动发布，请至少做到：
-
-| 措施 | 怎么做 |
+| Secret | 说明 |
 |---|---|
-| **不要邀请协作者** | 公开仓库不需要协作人也能自己维护。协作者 = 你把签名权给了对方 |
-| **关闭 fork 与 PR 触发** | `Settings → Actions → General`，取消勾选「允许 fork 仓库创建 pull request」 |
-| **把 Actions 默认权限降到只读** | 同页面，「Workflow permissions」选 **Read repository contents permission** |
-| **别在 workflow 里 echo 密钥** | 本仓库的 workflow 不会打印任何密钥内容，请不要往里加调试用 `echo $KS_PASS` |
-| **定期轮换** | 若怀疑泄露，重新生成密钥库并在 `Settings → Apps` 里重装到手机 |
+| `ERP_API_BASE` | 你的服务器地址 |
+| `ANDROID_KEYSTORE_BASE64` | 密钥库的 base64（`base64 -w0 release-key.jks > ks.b64`） |
+| `ANDROID_KEYSTORE_PASSWORD` | 密钥库口令 |
+| `ANDROID_KEY_ALIAS` | 密钥别名 |
+| `ANDROID_KEY_PASSWORD` | 别名口令 |
 
-**完全不想承担这个风险的做法**：把仓库设为私有，Actions 照常自动发布，只有你自己能看到源码。
+签名四项**必须同时配**，只配密钥文件不配口令会被工作流直接拒绝 ——
+那会产出一个签不上名的包，比退回 debug 签名更危险。
 
 ### 发版铁律
 
-**版本号只有改`versionCode` 是不够的 —— 改完必须重新构建**，否则 APK 里还是旧版本号，
-老用户收不到更新提示。`versionCode` 必须**严格大于**线上正在发的那一个。
+**只改 `versionCode` 不够 —— 改完必须重新构建**，否则 APK 里还是旧版本号，
+老用户收不到更新提示。`versionCode` 必须**严格大于**线上正在发的那个。
 
 ## 目录结构
 

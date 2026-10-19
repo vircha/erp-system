@@ -104,3 +104,9 @@ Thumbs.db
 *.keep
 *.orig
 *.rej
+
+# ---- 本机打包配置与产物（含真实域名/签名口令，绝不入库）----
+build.local.env
+/dist/
+/android-native/local.properties
+/android-native/keystore.properties
