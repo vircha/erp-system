@@ -17,7 +17,7 @@
 //v24：去掉顶栏重复的「手机版」按钮，只留侧栏单入口
 //v22：导航栏加品牌图标 + 手机版下载按钮（含二维码）
 //v21：预览浮层 z-index 提到 70，不再被订单详情弹窗压住
-const CACHE = 'erp-shell-v48';   // v40: 修复批量导入开单折扣口径（写死整单返点 → 单品历史折扣按行带出）
+const CACHE = 'erp-shell-v49';   // v49: 客户下单员多门店（门店切换器 + 门店多选授权 + 按当前门店取历史价）
 const SHELL = ['/', '/index.html', '/css/style.css', '/css/login.css', '/css/feedback.css', '/css/print_template.css',
   '/js/app.js', '/js/receipt_preview.js', '/js/print_template.js',
   '/js/qrcode-mini.js', '/js/apk_download.js', '/js/feedback.js', '/privacy.html', '/img/logo_192.png'];

@@ -73,12 +73,23 @@ fun UnsettledDialog(
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text("欠款合计", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            // 🔴🔴 同PayDialog：标签是「欠款合计」就必须用 debt（含退货冲减），
+                            //    totalLeft 不含退货 —— 显示会比实际欠款偏大。
                             Text(
-                                "¥" + fmtUnsettled(data.totalLeft),
+                                "¥" + fmtUnsettled(data.debt),
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.error
                             )
+                            // 把口径写出来：有退货冲减时数字变小是正常的，不是算错
+                            if (data.returnCredit != 0.0) {
+                                Text(
+                                    "待收 " + fmtUnsettled(data.totalLeft) +
+                                        " − 退货 " + fmtUnsettled(Math.abs(data.returnCredit)),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text("${data.orders.size} 张未结单", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Column(horizontalAlignment = Alignment.End) {

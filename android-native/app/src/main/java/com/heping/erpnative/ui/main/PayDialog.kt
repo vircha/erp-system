@@ -102,12 +102,26 @@ fun PayDialog(
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text("当前欠款", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                            // 🔴🔴 用 debt（含退货冲减），**不能用 totalLeft**。
+                            //    totalLeft 是「待收单据未结合计」，不含退货抵减 ——
+                            //    标签写着「欠款」却给一个没扣退货的数字，比显示错更糟：
+                            //    万家便利店-4店会显示 770.70，实际欠款 650.46（退货 -120.24）。
+                            //    （与网页版 2026-10-18 的修复口径保持一致）
                             Text(
-                                "¥" + String.format(java.util.Locale.US, "%.2f", data.totalLeft),
+                                "¥" + String.format(java.util.Locale.US, "%.2f", data.debt),
                                 style = MaterialTheme.typography.headlineSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
+                            // 有退货冲减时把口径写出来，否则数字变小会被当成算错
+                            if (data.returnCredit != 0.0) {
+                                Text(
+                                    "待收 " + String.format(java.util.Locale.US, "%.2f", data.totalLeft) +
+                                        " − 退货 " + String.format(java.util.Locale.US, "%.2f", Math.abs(data.returnCredit)),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
                         }
                         Column(horizontalAlignment = Alignment.End) {
                             Text("${data.orders.size} 张未结", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onErrorContainer)

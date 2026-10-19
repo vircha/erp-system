@@ -60,6 +60,7 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var showCustomer by remember { mutableStateOf(false) }
+    var showStorePicker by remember { mutableStateOf(false) }   // 2026-10-19 客户多门店：切换下单门店
     var productQuery by remember { mutableStateOf("") }
     var showSuccess by remember { mutableStateOf(false) }
     var printing by remember { mutableStateOf(false) }
@@ -116,8 +117,9 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
     }
     // 🔴 客户账号：开单只能给自己门店，加载完客户列表后自动锁定，不给选别家。
     //    服务端 POST /api/orders 也会强制改写 customer_id，这里只是让界面不误导。
+    // 2026-10-19 多门店：锁定的是**当前选中门店**（SessionStore.saleStore），可切换。
     LaunchedEffect(SessionStore.customerId, vm.customers.size) {
-        val cid = SessionStore.customerId
+        val cid = if (SessionStore.isCustomer) SessionStore.saleStore else SessionStore.customerId
         if (SessionStore.isCustomer && cid > 0 && vm.selectedCustomer?.id != cid) {
             vm.customers.firstOrNull { it.id == cid }?.let { vm.selectCustomer(it) }
         }
@@ -128,6 +130,20 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             customers = vm.customers,
             onPick = { vm.selectCustomer(it); showCustomer = false },
             onDismiss = { showCustomer = false }
+        )
+    }
+
+    // 2026-10-19 客户多门店：只列他被授权的门店
+    if (showStorePicker) {
+        val mine = vm.customers.filter { SessionStore.custStoreAllowed(it.id) }
+        StorePickerDialog(
+            stores = mine,
+            currentId = vm.selectedCustomer?.id ?: -1,
+            onPick = { c ->
+                showStorePicker = false
+                scope.launch { vm.switchStore(c.id) }
+            },
+            onDismiss = { showStorePicker = false }
         )
     }
 
@@ -317,16 +333,25 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (SessionStore.isCustomer) {
-                // 客户：直接显示本店名，不给他「选择客户」的入口
-                Box(
-                    Modifier.weight(1f).height(42.dp),
-                    contentAlignment = Alignment.CenterStart
+                // 客户：显示本店名；负责多家门店时给个切换入口，只有一家就直接锁死
+                val canSwitch = SessionStore.customerIds.size > 1
+                Row(
+                    Modifier.fillMaxWidth().height(42.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
                         vm.selectedCustomer?.name ?: "我的门店",
                         maxLines = 1, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 10.dp)
+                        modifier = Modifier.weight(1f).padding(start = 10.dp)
                     )
+                    if (canSwitch) {
+                        OutlinedButton(
+                            onClick = { showStorePicker = true },
+                            modifier = Modifier.height(36.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) { Text("切换门店", fontSize = 13.sp) }
+                    }
                 }
             } else {
             Button(
@@ -799,6 +824,53 @@ private fun CustomerPicker(
                             Column {
                                 HighlightText(c.name, q, style = MaterialTheme.typography.bodyLarge)
                                 if (!c.phone.isNullOrEmpty()) HighlightText(c.phone, q, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                        HorizontalDivider()
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+/**
+ * 2026-10-19 客户下单员多门店：只列他**被授权**的门店。
+ * 服务端也会再校验一次，这里少列只是界面干净，不构成安全边界。
+ */
+private fun StorePickerDialog(
+    stores: List<com.heping.erpnative.data.Customer>,
+    currentId: Int,
+    onPick: (com.heping.erpnative.data.Customer) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择下单门店") },
+        text = {
+            Column {
+                Text(
+                    "切换后商品价格会按该门店的历史送货价重新带出，已录入的商品会清空。",
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                    items(stores) { c ->
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable { if (c.id != currentId) onPick(c) }
+                                .padding(10.dp)
+                        ) {
+                            Column {
+                                Text(
+                                    (if (c.id == currentId) "✅ " else "") + c.name,
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                if (!c.phone.isNullOrEmpty()) {
+                                    Text(c.phone!!, style = MaterialTheme.typography.labelSmall)
+                                }
                             }
                         }
                         HorizontalDivider()

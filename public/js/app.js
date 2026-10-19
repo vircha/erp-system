@@ -105,7 +105,7 @@
   }
 
   let TOKEN = null, SHOP = '';
-  let ME = { role: 'staff', roleLabel: '员工', perms: [], book: null, account: null, books: [] };
+  let ME = { role: 'staff', roleLabel: '员工', perms: [], book: null, account: null, books: [], customerId: null, customerIds: [] };
   let TPL = { receipt_title: '销售小票', receipt_footer: '谢谢惠顾，欢迎再次光临', list_title: '商品清单' };
   async function loadTpl() {
     // 客户账号读 /api/settings 会被服务端拒绝（里面是小票抬头/仓库等内部设置），
@@ -318,7 +318,7 @@ if (d.trust_full) {
 
   // 🔴 v5.5：信任设备免密后不再自动跳进系统。
   //   拆成两步：tryTrustedLogin 只换 token + 拉 ME，**不调 afterAuth**；
-  //   然后 showTrustedPanel() 停��首页，用户点「进入开单」才真正 enterApp。
+  //   然后 showTrustedPanel() 停在首页，用户点「进入开单」才真正 enterApp。
   async function tryTrustedLogin() {
     const dt = getDeviceToken();
     if (!dt) return false;
@@ -415,7 +415,7 @@ if (d.trust_full) {
     localStorage.removeItem('erp_shop');
     localStorage.removeItem('erp_me');
     TOKEN = null;
-    ME = { role: 'staff', roleLabel: '员工', perms: [], book: null, account: null, books: [] };
+    ME = { role: 'staff', roleLabel: '员工', perms: [], book: null, account: null, books: [], customerId: null, customerIds: [] };
     hideTrustedPanel();
     showLogin();
   }
@@ -520,7 +520,7 @@ if (d.trust_full) {
     // 用户可在面板上点「更换账号」才真正解除信任。
     localStorage.removeItem('erp_token'); localStorage.removeItem('erp_shop');
     localStorage.removeItem('erp_me');
-    TOKEN = null; ME = { role: 'staff', roleLabel: '员工', perms: [], book: null, account: null, books: [] };
+    TOKEN = null; ME = { role: 'staff', roleLabel: '员工', perms: [], book: null, account: null, books: [], customerId: null, customerIds: [] };
     if (FB_TIMER) { clearInterval(FB_TIMER); FB_TIMER = null; }
     if (getDeviceToken()) {
       // 免密令牌还在 → 直接重新走一次免密，停在选择页
@@ -619,7 +619,17 @@ if (d.trust_full) {
       $('#page').innerHTML = '<div class="card muted" style="padding:16px">该页面仅客户账号可用</div>';
       return;
     }
-    const cid = ME.customerId;
+    // 2026-10-19 多门店：与开单页当前门店一致，切了店这里就换一家店的欠款
+    let cid = ME.customerId;
+    if (ME.role === 'customer') {
+      const allowed = (ME.customerIds || []).map(Number);
+      if (!allowed.length) {
+        $('#page').innerHTML = '<div class="card muted" style="padding:16px">账号尚未绑定门店，请联系商家开通</div>';
+        return;
+      }
+      cid = Number(sessionStorage.getItem('sale_store') || 0);
+      if (allowed.indexOf(cid) < 0) cid = Number(ME.customerId) || allowed[0];
+    }
     if (!cid) {
       $('#page').innerHTML = '<div class="card muted" style="padding:16px">账号尚未绑定门店，请联系商家开通</div>';
       return;
@@ -958,7 +968,13 @@ if (d.trust_full) {
   let custDiscount = 1;      // 当前门店上次整单折扣
   let custHasHistory = false;
 
-  async function ensureSaleData() { allCustomers = await API.req('GET', '/api/customers'); allProducts = await API.req('GET', '/api/products'); }
+  // 🔴 2026-10-19 客户多门店：商品价按「当前选中门店」取，所以这里必须带 customer_id。
+//    不带的话客户切了门店，加进购物车的还是**默认门店**的价格 —— 看着能下单，钱算错了。
+  async function ensureSaleData(storeId) {
+    allCustomers = await API.req('GET', '/api/customers');
+    const q = (ME.role === 'customer' && storeId) ? ('?customer_id=' + storeId) : '';
+    allProducts = await API.req('GET', '/api/products' + q);
+  }
 
   // 取某商品在当前门店的默认价：①门店历史价 ②默认价体系 ③商品基础价
   function priceFor(pid) {
@@ -1008,16 +1024,29 @@ if (d.trust_full) {
   }
 
   async function renderSale() {
-    await ensureSaleData();
+    await ensureSaleData(ME.role === 'customer' ? Number(sessionStorage.getItem('sale_store') || 0) || ME.customerId : 0);
     // 🔴 客户账号：只给自己门店下销售单。锁定门店、禁退货单、禁批量导入/改折扣。
     const isCust = ME.role === 'customer';
     if (isCust) {
       saleDocType = 'sale';   // 没有 setReturnMode()，退货模式是直接改 saleDocType
-      if (ME.customerId && !saleState.customer_id) {
-        saleState.customer_id = ME.customerId;
-        const c0 = allCustomers.find(x => x.id == ME.customerId);
-        saleState.customer_name = c0 ? c0.name : '';
+      // 🔴 2026-10-19 多门店：当前门店存 sessionStorage，切门店不用重新登录。
+      //    校验合法性 —— 手工改 localStorage 塞一个不属于他的门店 id，必须回落到默认门店。
+      const allowed = (ME.customerIds && ME.customerIds.length) ? ME.customerIds.map(Number) : [Number(ME.customerId)].filter(Boolean);
+      if (!allowed.length) {
+        $('#page').innerHTML = '<div class="card muted" style="padding:16px">账号还没有绑定门店，请联系商家开通。</div>';
+        return;
       }
+      let cur = Number(sessionStorage.getItem('sale_store') || 0);
+      if (allowed.indexOf(cur) < 0) cur = Number(ME.customerId) || allowed[0];
+      sessionStorage.setItem('sale_store', String(cur));
+      saleState.customer_id = cur;
+      const c0 = allCustomers.find(x => Number(x.id) === cur);
+      saleState.customer_name = c0 ? c0.name : '';
+      // 🔴 必须在这里就把该门店的历史价装上：客户模式没有 <select>，
+      //    也就永远不会触发 custSel.onchange → loadCustPrices。
+      //    漏了这一步的现象是「门店名对、价格全是 0」。
+      await loadCustPrices(cur);
+      const di0 = $('#sale-discount'); if (di0) di0.value = 1;
     }
     const page = $('#page');
     const ret = isReturnMode();
@@ -1036,8 +1065,14 @@ if (d.trust_full) {
         <div class="card sale-top-cell">
           <label>客户 / 门店</label>
           ${isCust
-            ? `<div style="padding:8px 0;font-weight:600">${esc(saleState.customer_name || '—')}</div>
-               <div class="muted" style="font-size:12px">已按你的门店带出该店价格</div>`
+            ? `<div class="row between" style="gap:8px;align-items:center">
+                 <div style="padding:8px 0;font-weight:600">${esc(saleState.customer_name || '—')}</div>
+                 ${(ME.customerIds || []).length > 1
+                   // 🔴 2026-10-19 负责多家门店 → 给一个切换按钮；只有一家就直接锁死不给入口
+                   ? `<button class="btn-sm gray" id="sale-switch-store" style="flex:0 0 auto;white-space:nowrap">🏪 切换门店</button>`
+                   : ''}
+               </div>
+               <div class="muted" style="font-size:12px">价格按<b>当前门店的历史送货价</b>带出</div>`
             : `<select id="sale-customer">
             <option value="">— 请选择 —</option>
             ${allCustomers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
@@ -1109,6 +1144,35 @@ if (d.trust_full) {
     });
     // 🔴 客户模式下 select 根本不渲染 → 直接赋值 onchange 会 TypeError 并打断后面所有绑定
     const custSel = $('#sale-customer');
+    // 客户多门店：切换门店 = 换默认门店 + 重载该店价格 + 重载该店商品价
+    const swBtn = $('#sale-switch-store');
+    if (swBtn) swBtn.onclick = async () => {
+      const mine = allCustomers.filter(c => (ME.customerIds || []).map(Number).indexOf(Number(c.id)) >= 0);
+      if (!mine.length) { toast('账号没有绑定门店'); return; }
+      const cur = Number(saleState.customer_id);
+      showModal('选择下单门店', `
+        <div class="muted" style="font-size:12px;margin-bottom:10px">
+          切换后，商品价格会按<b>该门店的历史送货价</b>重新带出。
+        </div>
+        <div class="search-result">
+          ${mine.map(c => `
+            <div class="search-item" data-store="${c.id}" style="display:flex;justify-content:space-between;align-items:center">
+              <span>${Number(c.id) === cur ? '✅ ' : ''}${esc(c.name)}</span>
+            </div>`).join('')}
+        </div>`);
+      document.querySelectorAll('[data-store]').forEach(el => el.onclick = async () => {
+        const id = Number(el.dataset.store);
+        if (id === cur) { closeModal(); return; }
+        if (saleState.items.length && !confirm('切换门店会清空已录入的商品（价格要按新店重算），继续？')) return;
+        sessionStorage.setItem('sale_store', String(id));
+        saleState.customer_id = id;
+        const c = allCustomers.find(x => Number(x.id) === id);
+        saleState.customer_name = c ? c.name : '';
+        saleState.items = [];
+        closeModal();
+        renderSale();          // 重走一遍：ensureSaleData 会带 customer_id 重取商品价
+      });
+    };
     if (custSel) custSel.onchange = async e => {
       saleState.customer_id = e.target.value ? +e.target.value : null;
       const c = allCustomers.find(x => x.id == saleState.customer_id);
@@ -1372,6 +1436,12 @@ if (d.trust_full) {
       custPrice = {}; custItemDisc = {}; custDiscount = 1; custHasHistory = false;
       const sel = $('#sale-customer'); if (sel) sel.value = '';
       const discInp = $('#sale-discount'); if (discInp) discInp.value = '1';
+      // 🔴 2026-10-19 客户账号：单交完要把当前门店和该店价格**重新装回来**。
+      //    否则下一单既没有门店名（显示「—」）、也没有任何价格 → 加商品全是 0 元。
+      if (ME.role === 'customer') {
+        renderSale();
+        return;
+      }
       showCustHint();
       renderSaleItems();
       searchProducts($('#sale-search') ? $('#sale-search').value : '');
@@ -2195,11 +2265,18 @@ if (d.trust_full) {
     const totDebt = Object.values(ARS).reduce((a, r) => a + (r.debt || 0), 0);
     const totOver = Object.values(ARS).reduce((a, r) => a + (r.overdue_orders || 0), 0);
     // 客户下单账号（仅老板/经理）：一次拉回，行内显示「已开通/未开通」
+    //🔴 2026-10-19 一个门店可有多个下单员 → CACC 改成 customer_id → [账号] 的数组，
+    //    单个map 会把同店第2、3 个账号悄悄吃掉（行内看起来像没开通）。
     let CACC = {};
     if (canManageCustAcc()) {
       try {
         const accs = await API.req('GET', '/api/customer-accounts');
-        (accs || []).forEach(a => { if (a.customer_id) CACC[a.customer_id] = a; });
+        (accs || []).forEach(a => {
+          (a.customer_ids || (a.customer_id ? [a.customer_id] : [])).forEach(cid => {
+            if (!CACC[cid]) CACC[cid] = [];
+            CACC[cid].push(a);
+          });
+        });
       } catch (e) { /* 非老板/经理会 403，忽略即可 */ }
     }
     $('#page').innerHTML = `
@@ -2230,7 +2307,7 @@ if (d.trust_full) {
         : `<button class="btn-sm gray" data-price="${c.id}">门店价目</button>`)
         + (can('ar.edit') ? ` <button class="btn-sm" data-pay="${c.id}">💰 收款</button>` : '')
         + (can('ar.view') && ARS[c.id] ? ` <button class="btn-sm gray" data-orders="${c.id}">未结明细</button>` : '')
-        + (canManageCustAcc() ? ` <button class="btn-sm${CACC[c.id] ? '' : ' gray'}" data-acc="${c.id}">${CACC[c.id] ? '🔑 账号' : '🔑 开账号'}</button>` : '');
+        + (canManageCustAcc() ? ` <button class="btn-sm${(CACC[c.id] || []).length ? '' : ' gray'}" data-acc="${c.id}">${(CACC[c.id] || []).length ? `🔑 账号·${(CACC[c.id] || []).length}` : '🔑 开账号'}</button>` : '');
       $('#c-list').innerHTML = (arr.length
         ? arr.map(c => {
           const ar = ARS[c.id];
@@ -2261,7 +2338,7 @@ if (d.trust_full) {
       $('#c-list').querySelectorAll('[data-pay]').forEach(b => b.onclick = () => openPayDialog(+b.dataset.pay, () => renderCustomers()));
       $('#c-list').querySelectorAll('[data-orders]').forEach(b => b.onclick = () => showUnsettledDetail(+b.dataset.orders, arr));
       $('#c-list').querySelectorAll('[data-del]').forEach(b => b.onclick = async () => { if (confirm('确认删除该客户？')) { try { await API.req('DELETE', '/api/customers/' + b.dataset.del); toast('已删除'); renderCustomers(); } catch (e) { toast(e.message); } } });
-      $('#c-list').querySelectorAll('[data-acc]').forEach(b => b.onclick = () => openCustomerAccount(+b.dataset.acc, CACC[+b.dataset.acc], arr, () => renderCustomers()));
+      $('#c-list').querySelectorAll('[data-acc]').forEach(b => b.onclick = () => openCustomerAccount(+b.dataset.acc, (CACC[+b.dataset.acc] || [])[0], arr, () => renderCustomers(), CACC[+b.dataset.acc] || []));
     };
     $('#c-search').oninput = debounce(e => draw(e.target.value), 150);
     draw('');
@@ -2387,34 +2464,78 @@ if (d.trust_full) {
 
   // ---------- 客户下单账号管理（仅老板/经理）----------
   function canManageCustAcc() { return ME.role === 'boss' || ME.role === 'manager'; }
-  async function openCustomerAccount(cid, acc, list, done) {
+  // 门店多选控件：2026-10-19 起一个下单员可负责多家门店。
+//   allList = 本套账全部门店（renderCustomers 的 arr，含搜索过滤 → 用完整 list 更稳）
+//   返回 HTML；读取用 readPickedStores()
+  function storeMultiPickerHTML(allList, picked, prefix) {
+    const sel = (picked || []).map(Number);
+    return `<div class="store-picker" data-prefix="${prefix}">
+      <div class="muted" style="font-size:12px;margin-bottom:6px">负责的门店（可多选；不勾这家门店他就不能给它下单）</div>
+      <div class="store-picker-list">
+        ${(allList || []).map(c => `
+          <label class="store-picker-item">
+            <input type="checkbox" data-st="${c.id}" ${sel.indexOf(Number(c.id)) >= 0 ? 'checked' : ''}/>
+            <span>${esc(c.name)}</span>
+          </label>`).join('')}
+      </div>
+      <div class="row between" style="margin-top:8px">
+        <span class="muted" id="${prefix}-cnt" style="font-size:12px"></span>
+        <span>
+          <button type="button" class="btn-sm gray" id="${prefix}-none">全不选</button>
+        </span>
+      </div>
+    </div>`;
+  }
+  // 🔴 动态节点必须「先入DOM 再 getElementById 绑定」——弹窗 HTML 是 showModal 之后才插进页面的
+  function bindStoreMultiPicker(prefix, onChange) {
+    const box = document.querySelector('.store-picker[data-prefix="' + prefix + '"]');
+    if (!box) return () => [];
+    const cnt = document.getElementById(prefix + '-cnt');
+    const read = () => Array.from(box.querySelectorAll('input[data-st]:checked')).map(i => Number(i.dataset.st));
+    const upd = () => { if (cnt) cnt.textContent = '已选 ' + read().length + ' 家'; if (onChange) onChange(read()); };
+    box.querySelectorAll('input[data-st]').forEach(i => i.onchange = upd);
+    const nb = document.getElementById(prefix + '-none');
+    if (nb) nb.onclick = () => { box.querySelectorAll('input[data-st]').forEach(i => { i.checked = false; }); upd(); };
+    upd();
+    return read;
+  }
+
+  async function openCustomerAccount(cid, acc, list, done, sameStoreAccs) {
     const c = (list || []).find(x => x.id == cid) || { name: '' };
+    const others = (sameStoreAccs || []).filter(a => !acc || a.id !== acc.id);
     if (!acc) {
       showModal('开通下单账号 · ' + c.name, `
         <div class="muted" style="font-size:12px;margin-bottom:10px">
           开通后该门店可用「手机号 + 密码」登录，只能给自己下单、看自己的订单和欠款。
+          一个下单员可以负责多家门店，勾几家就下几家的单。
         </div>
+        ${storeMultiPickerHTML(list, [cid], 'ca')}
         <label>登录手机号 *</label><input id="ca-phone" placeholder="11 位手机号" inputmode="numeric"/>
         <label>初始密码 *</label><input id="ca-pwd" placeholder="至少 4 位"/>
         <label>显示名（可留空）</label><input id="ca-name" value="${esc(c.name)}"/>
         <button class="btn-primary" id="ca-create" style="margin-top:14px">开通账号</button>`);
+      const readStores = bindStoreMultiPicker('ca');
       const btn = $('#ca-create');
       if (!btn) return;
       btn.onclick = async () => {
         const phone = String(($('#ca-phone') || {}).value || '').trim();
         const pwd = String(($('#ca-pwd') || {}).value || '');
+        const ids = readStores();
         if (!/^1[3-9]\d{9}$/.test(phone)) { toast('请填写正确的 11 位手机号'); return; }
         if (pwd.length < 4) { toast('密码至少 4 位'); return; }
+        if (!ids.length) { toast('至少要勾一家门店'); return; }
         try {
           await API.req('POST', '/api/customer-accounts', {
-            phone, password: pwd, customer_id: cid,
+            phone, password: pwd, customer_ids: ids,
             display_name: String(($('#ca-name') || {}).value || '').trim(),
           });
-          closeModal(); toast('已开通：' + phone); if (done) done();
+          closeModal(); toast('已开通：' + phone + '（' + ids.length + ' 家门店）'); if (done) done();
         } catch (e) { toast(e.message || '开通失败'); }
       };
       return;
     }
+    const accIds = (acc.customer_ids || (acc.customer_id ? [acc.customer_id] : [])).map(Number);
+    const nameOf = id => { const x = (list || []).find(y => Number(y.id) === Number(id)); return x ? x.name : ('门店#' + id); };
     showModal('下单账号 · ' + c.name, `
       <div class="row between" style="padding:8px 10px;background:var(--color-background-secondary);border-radius:8px;margin-bottom:10px">
         <span class="muted">登录手机号</span>
@@ -2424,11 +2545,40 @@ if (d.trust_full) {
         <span class="muted">状态</span>
         <span style="color:${acc.active ? '#0B6B49' : 'var(--danger)'}">${acc.active ? '已启用' : '已停用'}</span>
       </div>
-      <div class="muted" style="font-size:12px;margin-bottom:10px">该账号只能给自己门店下单、看自己的订单和欠款，看不到商品成本/库存/报表。</div>
+      <div class="row between" style="padding:0 10px 8px;font-size:12px">
+        <span class="muted">负责门店</span>
+        <b>${accIds.length} 家</b>
+      </div>
+      <div style="padding:0 10px 10px;font-size:12px">${accIds.map(id => esc(nameOf(id))).join('、') || '<span class="muted">未绑定</span>'}</div>
+      <button class="btn-sm gray" id="ca-stores" style="width:100%;margin-bottom:8px">🏪 调整负责门店</button>
+      <div class="muted" style="font-size:12px;margin-bottom:10px">该账号只能给自己负责的门店下单、看自己的订单和欠款，看不到商品成本/库存/报表。</div>
       <label>新密码（重置）</label><input id="ca-npwd" placeholder="至少 4 位"/>
       <button class="btn-sm" id="ca-reset" style="width:100%;margin-top:10px">重置密码</button>
       <button class="btn-sm gray" id="ca-toggle" style="width:100%;margin-top:8px">${acc.active ? '停用账号' : '启用账号'}</button>
-      <button class="btn-sm danger" id="ca-del" style="width:100%;margin-top:8px">删除账号</button>`);
+      <button class="btn-sm danger" id="ca-del" style="width:100%;margin-top:8px">删除账号</button>
+      ${others.length ? `<div class="muted" style="font-size:12px;margin-top:12px;border-top:1px solid var(--color-border);padding-top:10px">
+          本门店还有${others.length} 个下单账号：${others.map(a => esc(a.username)).join('、')}
+        </div>` : ''}`);
+    const b0 = $('#ca-stores');
+    // 🔴 调整门店要传**全部门店**清单，不能用搜索过滤后的 arr —— 否则改一次门店就把其余的搞丢了
+    if (b0) b0.onclick = async () => {
+      let all = [];
+      try { all = await API.req('GET', '/api/customers'); } catch (e) { all = list || []; }
+      showModal('调整负责门店 · ' + acc.username, `
+        ${storeMultiPickerHTML(all, accIds, 'cs')}
+        <button class="btn-primary" id="cs-save" style="margin-top:14px">保存</button>`);
+      const read = bindStoreMultiPicker('cs');
+      const sv = $('#cs-save');
+      if (!sv) return;
+      sv.onclick = async () => {
+        const ids = read();
+        if (!ids.length) { toast('至少要保留一家门店'); return; }
+        try {
+          await API.req('PUT', '/api/customer-accounts/' + acc.id + '/stores', { customer_ids: ids });
+          closeModal(); toast('已更新：' + ids.length + ' 家门店'); if (done) done();
+        } catch (e) { toast(e.message); }
+      };
+    };
     const b1 = $('#ca-reset');
     if (b1) b1.onclick = async () => {
       const np = String(($('#ca-npwd') || {}).value || '');

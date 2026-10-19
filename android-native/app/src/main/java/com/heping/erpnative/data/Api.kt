@@ -36,6 +36,10 @@ object SessionStore {
     private val WAREHOUSE = stringPreferencesKey("receipt_warehouse") // 出库仓库（打印小票用）
     private val HANDLER = stringPreferencesKey("receipt_handler")     // 经手人（打印小票用，空=用登录账号名）
     private val CUSTOMER_ID = intPreferencesKey("customer_id")        // 客户账号绑定的门店（0=无）
+    // 2026-10-19：客户下单员可负责多家门店，这里存全部授权门店 id（逗号分隔）
+    private val CUSTOMER_IDS = stringPreferencesKey("customer_ids")
+    // 当前正在下单的门店 id（2026-10-19 多门店切换器用；非法值会被回落成默认门店）
+    private val SALE_STORE = intPreferencesKey("sale_store")
 
     /** 出库仓库默认值（与纸质送货单一致） */
     const val DEFAULT_WAREHOUSE = "天河仓"
@@ -57,12 +61,32 @@ object SessionStore {
     var displayName: String = ""                       // 打印小票「经手人」
     var receiptWarehouse: String = DEFAULT_WAREHOUSE   // 打印小票「出库仓库」
     var receiptHandler: String = ""                    // 打印小票「经手人」固定值（空=用登录账号名）
-    /** 客户账号绑定的门店 id（0 = 非客户账号 / 未绑定） */
+    /** 客户账号绑定的门店 id（0 = 非客户账号 / 未绑定）；多门店下这是**默认门店** */
     var customerId: Int = 0
+
+    /**
+     * 2026-10-19 客户下单员可负责多家门店。
+     * 这是他被授权的**全部**门店；[customerId] 只是默认门店。
+     * 🔴 所有数据隔离判断都要查这个集合，比等号安全 —— 单值只当「没指定时的回落值」。
+     */
+    var customerIds: List<Int> = emptyList()
+
+    /** 当前下单的门店（多门店切换器选中项）；非法值会在读取时回落成默认门店 */
+    var saleStore: Int = 0
+        get() {
+            if (!isCustomer) return 0
+            val ids = customerIds.ifEmpty { listOf(customerId) }.filter { it > 0 }
+            return if (ids.contains(field)) field else (customerId.takeIf { ids.contains(it) } ?: ids.firstOrNull() ?: 0)
+        }
+
     val isBoss get() = role == "boss"
     val isManager get() = role == "boss" || role == "manager"
     /** 客户下单角色：只能给自己门店下单 + 看自己的订单/欠款 */
     val isCustomer get() = role == "customer"
+
+    /** 客户当前正在下单的门店是否归他管（服务端还会再校验一次，这里只管界面别给错选项） */
+    fun custStoreAllowed(id: Int): Boolean =
+        if (!isCustomer) true else customerIds.ifEmpty { listOf(customerId) }.contains(id)
 
     fun can(perm: String): Boolean = perms.contains("*") || perms.contains(perm)
 
@@ -78,6 +102,9 @@ object SessionStore {
         bookName = a.book?.name ?: ""
         shopName = a.shopName
         customerId = a.customerId ?: a.account?.customerId ?: 0
+        // 2026-10-19 多门店：服务端两个来源都给（顶层 customerIds / account.customer_ids）
+        customerIds = (a.customerIds.ifEmpty { a.account?.customerIds ?: emptyList() })
+            .filter { it > 0 }.ifEmpty { listOfNotNull(customerId.takeIf { i -> i > 0 }) }
         displayName = a.account?.display_name?.takeIf { it.isNotBlank() } ?: a.account?.username ?: ""
         ctx.dataStore.edit {
             it[TOKEN] = Crypto.encrypt(a.token)
@@ -85,6 +112,7 @@ object SessionStore {
             it[ROLE] = a.role
             it[PERMS] = a.perms.joinToString(",")
             it[CUSTOMER_ID] = customerId
+            it[CUSTOMER_IDS] = customerIds.joinToString(",")
             it[BOOK_ID] = (a.book?.id ?: 1).toLong()
             it[BOOK_NAME] = a.book?.name ?: ""
             it[SHOP] = a.shopName
@@ -108,6 +136,11 @@ object SessionStore {
         receiptWarehouse = p[WAREHOUSE]?.takeIf { it.isNotBlank() } ?: DEFAULT_WAREHOUSE
         receiptHandler = p[HANDLER] ?: ""
         customerId = p[CUSTOMER_ID] ?: 0
+        // 2026-10-19：老版本升级上来时 CUSTOMER_IDS 是空的 → 回落成默认门店，不能是空集合
+        customerIds = (p[CUSTOMER_IDS] ?: "").split(",").mapNotNull { it.trim().toIntOrNull() }
+            .filter { it > 0 }
+            .ifEmpty { listOfNotNull(customerId.takeIf { i -> i > 0 }) }
+        saleStore = p[SALE_STORE] ?: 0
         return true
     }
 
@@ -127,15 +160,28 @@ object SessionStore {
 
     suspend fun saveProfile(
         role: String, perms: List<String>, bookId: Int, bookName: String, shopName: String,
-        customerId: Int = this.customerId
+        customerId: Int = this.customerId,
+        customerIds: List<Int> = this.customerIds
     ) {
         this.role = role; this.perms = perms; this.bookId = bookId; this.bookName = bookName; this.shopName = shopName
         this.customerId = customerId
+        // 传空列表 = 这次没带（如切套账后重登），保留原集合，别把门店授权清空
+        val ids = customerIds.filter { it > 0 }.ifEmpty { this.customerIds.filter { i -> i > 0 } }
+            .ifEmpty { listOfNotNull(customerId.takeIf { i -> i > 0 }) }
+        this.customerIds = ids
         ctx.dataStore.edit {
             it[ROLE] = role; it[PERMS] = perms.joinToString(",")
             it[BOOK_ID] = bookId.toLong(); it[BOOK_NAME] = bookName; it[SHOP] = shopName
             it[CUSTOMER_ID] = customerId
+            it[CUSTOMER_IDS] = ids.joinToString(",")
         }
+    }
+
+    /** 2026-10-19 切换当前下单门店（多门店切换器调用） */
+    suspend fun setSaleStore(id: Int) {
+        if (!custStoreAllowed(id)) return          // 不属于他的门店，忽略
+        saleStore = id
+        ctx.dataStore.edit { it[SALE_STORE] = id }
     }
 
     /** 持久化主题模式（0=跟随系统 1=浅色 2=深色） */
@@ -146,6 +192,7 @@ object SessionStore {
 
     suspend fun clear() {        role = "staff"; perms = emptyList(); bookId = 1; bookName = ""; shopName = ""
         displayName = ""; receiptWarehouse = DEFAULT_WAREHOUSE; receiptHandler = ""; customerId = 0
+        customerIds = emptyList(); saleStore = 0
         ctx.dataStore.edit { it.clear() }
     }
 
@@ -153,9 +200,13 @@ object SessionStore {
     suspend fun logoutKeepDevice() {
         token = null
         role = "staff"; perms = emptyList(); bookId = 1; bookName = ""; shopName = ""; displayName = ""
+        // 🔴 原来忘了清 customerId：退出登录后内存里还留着上一个客户的门店 id，
+        //    下一个（不同门店的）账号登进来时可能被当成自己的门店。2026-10-19 一并清掉。
+        customerId = 0; customerIds = emptyList(); saleStore = 0
         ctx.dataStore.edit {
             it.remove(TOKEN); it.remove(ROLE); it.remove(PERMS)
             it.remove(BOOK_ID); it.remove(BOOK_NAME); it.remove(SHOP); it.remove(DISPLAY)
+            it.remove(CUSTOMER_ID); it.remove(CUSTOMER_IDS); it.remove(SALE_STORE)
         }
     }
 
@@ -207,7 +258,12 @@ interface ErpApi {
 
     // 商品
     @GET("api/products")
-    suspend fun products(@Query("q") q: String? = null): List<Product>
+    suspend fun products(
+        @Query("q") q: String? = null,
+        // 🔴 2026-10-19 客户多门店：必须带上当前门店，服务端才返回**那家店**的历史送货价。
+        //    不带的话客户切了门店，加进购物车的还是默认门店的价格。
+        @Query("customer_id") customerId: Int? = null
+    ): List<Product>
 
     @POST("api/products")
     suspend fun createProduct(@Body b: Product): IdResponse

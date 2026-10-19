@@ -19,6 +19,14 @@ object CacheStore {
     private val CUSTOMERS = stringPreferencesKey("customers")
     private val PRODUCTS = stringPreferencesKey("products")
 
+    /**
+     * 2026-10-19 客户多门店：商品缓存是**按门店价格**存的（客户拿到的是本店价，不是统一价）。
+     * 切了门店却读上一家的缓存 = 下单金额直接算错，所以记住这份缓存属于哪个门店。
+     * 内部角色看到的是统一价（cid 恒为 0），共用一份缓存。
+     */
+    @Volatile var lastProductStore: Int? = null
+        private set
+
     private fun ordersKey(from: String, to: String) = stringPreferencesKey("orders_${from}_$to")
 
     private inline fun <reified T> fromJson(s: String?): List<T> {
@@ -36,7 +44,9 @@ object CacheStore {
         fromJson(SessionStore.appContext.cacheStore.data.first()[CUSTOMERS])
 
     // ---------- 商品 ----------
-    suspend fun putProducts(list: List<Product>) {
+    // 🔴 2026-10-19 多门店：store = 这份缓存对应的门店（客户角色必传，内部角色传 null）
+    suspend fun putProducts(list: List<Product>, store: Int? = null) {
+        lastProductStore = store
         SessionStore.appContext.cacheStore.edit { it[PRODUCTS] = toJson(list) }
     }
     suspend fun getProducts(): List<Product> =

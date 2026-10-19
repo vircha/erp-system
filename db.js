@@ -61,6 +61,16 @@ CREATE TABLE IF NOT EXISTS account_books (
   PRIMARY KEY(account_id, book_id)
 );
 
+-- 🔴 2026-10-19客户下单员可负责多家门店（多对多）。
+--   accounts.customer_id 只留作「默认门店」（首次开通的那家），兼容既有前端字段；
+--   真正的授权范围以本表为准。同一门店允许多个下单员账号（店长+下单员）。
+CREATE TABLE IF NOT EXISTS account_stores (
+  account_id INTEGER,
+  book_id    INTEGER,
+  customer_id INTEGER,
+  PRIMARY KEY(account_id, book_id, customer_id)
+);
+
 CREATE TABLE IF NOT EXISTS customers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   book_id INTEGER DEFAULT 1,
@@ -381,7 +391,22 @@ try {
   ensureColumn('accounts', 'banned_at', 'banned_at TEXT');
   // 2026-10-18 客户下单角色：账号绑定门店，决定他能看/下哪一家的单
   ensureColumn('accounts', 'customer_id', 'customer_id INTEGER');
-  ['customers', 'products', 'inventory', 'orders', 'order_items', 'price_systems', 'deliveries', 'delivery_items', 'customer_prices', 'customer_discounts'].forEach(t => ensureColumn(t, 'book_id', 'book_id INTEGER DEFAULT 1'));} catch (e) { console.error('migrate:', e.message); }
+  ['customers', 'products', 'inventory', 'orders', 'order_items', 'price_systems', 'deliveries', 'delivery_items', 'customer_prices', 'customer_discounts'].forEach(t => ensureColumn(t, 'book_id', 'book_id INTEGER DEFAULT 1'));
+} catch (e) { console.error('migrate:', e.message); }
+
+// 🔴🔴 2026-10-19 客户下单员多门店：把老的单门店绑定回填进 account_stores。
+//   幂等（INSERT OR IGNORE + NOT EXISTS 去重），重启多少次结果都一样。
+//   ⚠️ 只在 account_stores 里补，绝不去改/删accounts.customer_id —— 前端还读它当默认门店。
+try {
+  const legacy = db.prepare("SELECT id, book_id, customer_id FROM accounts WHERE role='customer' AND customer_id IS NOT NULL").all();
+  const ins = db.prepare('INSERT OR IGNORE INTO account_stores(account_id, book_id, customer_id) VALUES(?,?,?)');
+  const has = db.prepare('SELECT 1 FROM account_stores WHERE account_id=? AND customer_id=?');
+  let n = 0;
+  for (const a of legacy) {
+    if (!has.get(a.id, a.customer_id)) { ins.run(a.id, a.book_id || 1, a.customer_id); n++; }
+  }
+  if (n) console.log('migrate account_stores:回填 ' + n + ' 条客户账号门店绑定');
+} catch (e) { console.error('migrate account_stores:', e.message); }
 
 // settings 表结构迁移：旧表为主键 key，需改为 (book_id,key)
 try {
@@ -480,13 +505,10 @@ seed();
 
 // 默认密码持续告警：只要库里 admin 账号仍是默认密码，每次启动都提醒一次。
 // 只比对哈希、不打印明文，避免日志里再泄一次。
-// （注意：若库里存在 admin，说明它可能是历史上用默认账号建的，与本次
-//   ERP_BOSS_USERNAME 无关 —— 提示语里已说明「登录后到设置页改」。）
 try {
   const a = db.prepare("SELECT username, password FROM accounts WHERE username='admin'").get();
   if (a && verifyPassword && verifyPassword('admin123', a.password)) {
     console.log('⚠️  安全告警：账号 admin 仍在使用默认密码 admin123，请到「设置」页修改。');
-    console.log('   （这个账号是历史上用默认凭据创建的；改 ERP_BOSS_* 环境变量不会影响它）');
   }
 } catch (e) { /* verifyPassword 未导出时静默跳过 */ }
 
@@ -515,6 +537,8 @@ try {
     CREATE INDEX IF NOT EXISTS idx_payment_items_payment    ON payment_items(payment_id);
     CREATE INDEX IF NOT EXISTS idx_payment_items_order      ON payment_items(order_id);
     CREATE INDEX IF NOT EXISTS idx_customer_terms_book      ON customer_terms(book_id, customer_id);
+    CREATE INDEX IF NOT EXISTS idx_account_stores_ac        ON account_stores(account_id);
+    CREATE INDEX IF NOT EXISTS idx_account_stores_cust      ON account_stores(book_id, customer_id);
   `);
 } catch (e) { console.error('create indexes:', e.message); }
 

@@ -60,8 +60,11 @@ const ROLES = {
   //    否则客户改个 URL 参数就能看到全店经营数据。见各接口里的 isCustomer 分支。
   customer: {
     label: '客户',
-    // customer.view 是开单页取本店名必须的（GET /api/customers 对客户只返回自己那条）
-    perms: ['sale.create', 'order.view', 'order.print', 'product.view', 'customer.view', 'ar.view', 'profile.edit']
+    // customer.view 是开单页取本店名必须的（GET /api/customers 对客户只返回自己负责的那些）
+    // 🔴 price.view 只为 GET /api/customer-prices（取**自己门店**的历史送货价）。
+    //    别被它吓到：价目体系(price-systems) 和 各价体系底价(prices) 两个接口
+    //    在 need() 之后还有一层显式的 isCustomer 403，客户照样看不到全店价格表。
+    perms: ['sale.create', 'order.view', 'order.print', 'product.view', 'customer.view', 'price.view', 'ar.view', 'profile.edit']
   }
 };
 function roleLabel(r) { return (ROLES[r] || {}).label || r; }
@@ -72,8 +75,41 @@ function can(role, perm) {
   return r.perms.includes(perm);
 }
 
-// ---------- 客户角色的数据隔离（2026-10-18）----------
+// ---------- 客户角色的数据隔离（2026-10-18；2026-10-19 支持多门店）----------
 function isCustomer(ctx) { return !!(ctx && ctx.role === 'customer'); }
+
+// 账号被授权的门店集合（account_stores 表）。非客户角色返回空数组。
+//   表里没记录（迁移失败/手工插的账号）时回落到 accounts.customer_id，至少还能用。
+function custStoreIdsOf(acc, bookId) {
+  if (!acc || acc.role !== 'customer') return [];
+  let ids = [];
+  try {
+    ids = db.prepare('SELECT customer_id FROM account_stores WHERE account_id=? AND book_id=? ORDER BY customer_id')
+      .all(acc.id, bookId).map(r => Number(r.customer_id)).filter(n => isFinite(n) && n > 0);
+  } catch (e) { }
+  // 🔴 默认门店永远并进授权集合。
+  //    只在 ids 为空时才回落是不够的：那会导致「默认门店 A 被移出多门店绑定后，
+  //    账号连自己原本那家店都下不了单」，而 accounts.customer_id 还指着它。
+  const def = Number(acc.customer_id);
+  if (isFinite(def) && def > 0 && ids.indexOf(def) < 0) { ids.push(def); ids.sort((a, b) => a - b); }
+  return ids;
+}
+// 🔴🔴 一个客户下单员可以负责多家门店 → 判断「这个门店归不归他管」必须查集合，不能比等号。
+//    门店 id 不在集合内一律当越权，返 404（403 等于确认「这个单号真实存在」）。
+function custAllowed(ctx, cid) {
+  if (!isCustomer(ctx)) return true;      // 内部角色不受门店限制
+  const n = Number(cid);
+  return isFinite(n) && n > 0 && (ctx.customerIds || []).indexOf(n) >= 0;
+}
+// 客户请求指定的门店：优先 body/query 里的customer_id（必须属于他的授权范围），
+// 否则回落到默认门店 accounts.customer_id。都不行返回 0。
+function custTarget(ctx, want) {
+  if (!isCustomer(ctx)) return Number(want) || 0;
+  const ids = ctx.customerIds || [];
+  const n = Number(want);
+  if (isFinite(n) && n > 0 && ids.indexOf(n) >= 0) return n;
+  return Number(ctx.customerId) || ids[0] || 0;
+}
 // 客户可见的商品字段：只给 name/spec/unit/barcode/装量 + 本店价。
 // 🔴 绝不给 cost（成本价）、qty（库存）、low_threshold（预警阈值）——
 //    这些是经营数据，客户拿到了等于把家底亮给别人看。
@@ -347,9 +383,14 @@ function ctxOf(req) {
   const bookId = s.book_id || acc.book_id;
   const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId);
   if (!book) return null;
-  // customer_id：客户账号绑定的门店。决定他能看/下哪一家的单（见 isCustomer 分支）。
-  const customerId = acc.customer_id ? Number(acc.customer_id) : null;
-  return { token: tok, account: acc, book, role: acc.role, bookId: book.id, customerId };
+  // customer_id：客户账号的**默认门店**（accounts.customer_id，首次开通的那家）。
+  // customerIds：他负责的**全部门店**（account_stores，2026-10-19 起支持多门店）。
+  //   数据隔离一律以 customerIds 为准，customerId 只当「没指定门店时的回落值」，
+  //   且必须落在 customerIds 里 —— 否则等于给账号开了一把后门。
+  const customerIds = custStoreIdsOf(acc, bookId);
+  const defaultCid = acc.customer_id ? Number(acc.customer_id) : null;
+  const customerId = (customerIds.indexOf(defaultCid) >= 0 ? defaultCid : (customerIds[0] || null));
+  return { token: tok, account: acc, book, role: acc.role, bookId: book.id, customerId, customerIds };
 }
 
 // 记录门店历史价：开单/改单成功后，把本单每个商品的成交价 + 单品折扣 + 整单折扣记到该门店名下
@@ -431,7 +472,10 @@ function getSetting(bookId, key, fallback) {
 function setSetting(bookId, key, value) {
   db.prepare('INSERT INTO settings(book_id,key,value) VALUES(?,?,?) ON CONFLICT(book_id,key) DO UPDATE SET value=excluded.value').run(bookId, key, String(value));
 }
-function effShopName(book) { return getSetting(book.id, 'shop_name', book.name); }
+// 🔴 防御：删套账等路径上 book 可能是 undefined（套账刚被删、查出null），
+//    直接 book.id 会抛 "Cannot read properties of undefined" 让整个请求 500。
+//    这里统一兜成空串，宁可店名空也不能让接口炸。
+function effShopName(book) { return book && book.id ? getSetting(book.id, 'shop_name', book.name || '') : ''; }
 // 邀请码（分享用；不是口令，可随时重置，明文存 settings.invite_code）
 function genInviteCode() {
   const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = '';
@@ -679,7 +723,9 @@ async function handleApi(req, res, u) {
       const acc = db.prepare('SELECT * FROM accounts WHERE id=?').get(aid);
       const tok = newSession(acc);
       const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId);
-      const outR = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book) };
+      const _rIds = custStoreIdsOf(acc, bookId);
+      const outR = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book),
+                    customerId: _rIds.indexOf(Number(acc.customer_id)) >= 0 ? Number(acc.customer_id) : (_rIds[0] || null), customerIds: _rIds };
       if (b.trust_device) {
         // 🔴 1.5.1：满 4 台时 token 为 null → 不下发免密令牌，但**登录照常成功**
         const t = newDeviceToken(acc, b.device);
@@ -716,7 +762,10 @@ async function handleApi(req, res, u) {
     clearLoginFail(username);
     const tok = newSession(acc);
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(acc.book_id);
-    const out = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book), isAdmin: !!acc.is_admin, violations: MOD ? MOD.myPending(acc.id) : [] };
+    // 🔴 这个分支没有 bookId 变量（那是注册分支的局部变量），必须用 acc.book_id
+    const _cIds = custStoreIdsOf(acc, acc.book_id || 1);
+    const out = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book), isAdmin: !!acc.is_admin, violations: MOD ? MOD.myPending(acc.id) : [],
+                  customerId: _cIds.indexOf(Number(acc.customer_id)) >= 0 ? Number(acc.customer_id) : (_cIds[0] || null), customerIds: _cIds };
     // 勾选「信任此设备」→ 签发 30 天设备令牌
     if (b.trust_device) {
       // 🔴 1.5.1：最多 4 台。满额时不下发令牌，但登录照常成功 ——
@@ -764,6 +813,8 @@ async function handleApi(req, res, u) {
       perms: permsOf(role), shopName: effShopName(ctx.book),
       books: myBooks(ctx.account),
       customerId: ctx.customerId || null,
+      // 2026-10-19 多门店：前端门店切换器的数据源（配合 customer_id= 传参取那家店的价格）
+      customerIds: (ctx.customerIds || []).slice(),
       isAdmin: !!ctx.account.is_admin,
       // 未处理反馈数：管理员看全部，普通用户看自己被回复后仍标记 open 的条数
       feedbackUnread: ctx.account.is_admin
@@ -883,11 +934,17 @@ async function handleApi(req, res, u) {
       db.exec('COMMIT');
     } catch (e) { db.exec('ROLLBACK'); return sendJSON(res, 500, { error: String(e.message || e) }); }
     // 4) 老板若还有其他套账 → 会话自动切换过去；否则登出
-    const rest = myBooks(ctx.account);
+    // 🔴🔴 必须**逐个校验套账还在不在**，不能只看myBooks 返回的条数。
+    //    myBooks() 的回落分支会返回 { id: acc.book_id } —— 而acc.book_id 指向的套账
+    //    可能正是刚被删掉的那一个。于是 rest.length===1 但 nb===undefined，
+    //    effShopName(undefined) 直接抛 'Cannot read properties of undefined' → 整个删除返 500，
+    //    **数据其实已经 COMMIT 删掉了**，前端却收到失败 → 白屏 + 用户以为没删成功。
+    //    （只删最后一个套账的老板 100% 触发。）
+    const rest = myBooks(ctx.account).filter(r => db.prepare('SELECT id FROM books WHERE id=?').get(r.id));
     if (rest.length) {
       SESSIONS.get(ctx.token).book_id = rest[0].id;
       const nb = db.prepare('SELECT * FROM books WHERE id=?').get(rest[0].id);
-      return sendJSON(res, 200, { ok: true, switched: true, book: pubBook(nb), shopName: effShopName(nb) });
+      return sendJSON(res, 200, { ok: true, switched: true, book: pubBook(nb), shopName: nb ? effShopName(nb) : '' });
     }
     SESSIONS.delete(ctx.token);
     return sendJSON(res, 200, { ok: true, logged_out: true });
@@ -936,14 +993,61 @@ async function handleApi(req, res, u) {
     return sendJSON(res, 200, { ok: true });
   }
 
-  // ---------- 客户下单账号（2026-10-18）----------
+  // ---------- 客户下单账号 ----------
   // 老板/经理给门店开通登录账号：手机号作登录名 + 初始密码，绑定 customers.id。
-  // 客户登录后只能给自己门店下单、看自己的订单和欠款。
+  // 2026-10-19 起支持「一个下单员负责多家门店」，绑定关系存 account_stores；
+  //   accounts.customer_id 只保留**默认门店**（首个），供旧字段/旧客户端回落。
+  //   「一个门店只允许一个账号」的限制已放开：同店可以有多个下单员（店长 + 下单员）。
+  function accStoreIds(accId) {
+    try {
+      return db.prepare('SELECT customer_id FROM account_stores WHERE account_id=? AND book_id=? ORDER BY customer_id')
+        .all(accId, bookId).map(r => Number(r.customer_id)).filter(n => isFinite(n) && n > 0);
+    } catch (e) { return []; }
+  }
   function custAccRow(r) {
-    const c = r.customer_id ? db.prepare('SELECT id,name FROM customers WHERE id=? AND book_id=?').get(r.customer_id, bookId) : null;
+    // 🔴🔴 以 account_stores 为准，但**默认门店必须并进授权集合**，与 custStoreIdsOf() 同口径。
+    //    不并的后果：账号默认门店 A、account_stores 里只有 B → 后台管理页只显示 [B]，
+    //    但这人实际能下 A 和 B 的单（ctx.customerIds 是并过的）。
+    //    「后台看到的」和「实际能干的」不一致，客服据此改权限一定会改错。
+    let ids = accStoreIds(r.id);
+    const def = Number(r.customer_id);
+    if (isFinite(def) && def > 0 && ids.indexOf(def) < 0) { ids.push(def); ids.sort((a, b) => a - b); }
+    const names = ids.length
+      ? db.prepare('SELECT id,name FROM customers WHERE book_id=? AND id IN (' + ids.map(() => '?').join(',') + ')').all(bookId, ...ids)
+      : [];
+    const nm = {}; names.forEach(n => { nm[n.id] = n.name; });
+    const defId = ids.indexOf(Number(r.customer_id)) >= 0 ? Number(r.customer_id) : (ids[0] || null);
     return { id: r.id, username: r.username, display_name: r.display_name, role: r.role,
-             roleLabel: roleLabel(r.role), active: !!r.active, customer_id: r.customer_id || null,
-             customer_name: c ? c.name : '', created_at: r.created_at };
+             roleLabel: roleLabel(r.role), active: !!r.active,
+             customer_id: defId,                            // 默认门店（兼容旧字段）
+             customer_ids: ids,                             // 🔴 授权的全部门店
+             customer_names: ids.map(i => nm[i] || ('门店#' + i)),
+             customer_name: defId ? (nm[defId] || '') : '',  // 兼容旧字段：默认门店名
+             created_at: r.created_at };
+  }
+  // 校验一批门店 id 全部属于本套账，返回去重后的合法列表（任一非法即整体拒绝）
+  function parseStoreIds(want, minOne) {
+    const arr = Array.isArray(want) ? want : (want === undefined || want === null || want === '' ? [] : [want]);
+    const ids = [];
+    for (const x of arr) {
+      const n = Number(x);
+      if (!isFinite(n) || n <= 0) continue;
+      if (ids.indexOf(n) < 0) ids.push(n);
+    }
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      const ok = db.prepare('SELECT id FROM customers WHERE book_id=? AND id IN (' + ph + ')').all(bookId, ...ids);
+      if (ok.length !== ids.length) return null;// 有不存在的门店 → 整体拒绝，别静默丢一家
+    } else if (minOne) {
+      return null;
+    }
+    return ids;
+  }
+  function writeAccStores(accId, ids, defId) {
+    db.prepare('DELETE FROM account_stores WHERE account_id=?').run(accId);
+    const ins = db.prepare('INSERT OR IGNORE INTO account_stores(account_id, book_id, customer_id) VALUES(?,?,?)');
+    for (const i of ids) ins.run(accId, bookId, i);
+    db.prepare('UPDATE accounts SET customer_id=? WHERE id=?').run(defId || null, accId);
   }
   if (p === '/api/customer-accounts' && method === 'GET') {
     if (role !== 'boss' && role !== 'manager') return sendJSON(res, 403, { error: '只有老板/经理可以管理客户账号' });
@@ -955,20 +1059,32 @@ async function handleApi(req, res, u) {
     const b = await getBody(req);
     const phone = String(b.phone || '').trim();
     const pwd = String(b.password || '');
-    const cid = Number(b.customer_id);
     if (!/^1[3-9]\d{9}$/.test(phone)) return sendJSON(res, 400, { error: '请填写正确的 11 位手机号' });
     if (pwd.length < 4) return sendJSON(res, 400, { error: '密码至少 4 位' });
-    if (!cid) return sendJSON(res, 400, { error: '请选择要开通的门店' });
-    const cust = db.prepare('SELECT * FROM customers WHERE id=? AND book_id=?').get(cid, bookId);
-    if (!cust) return sendJSON(res, 400, { error: '门店不存在' });
-    // 一个门店只允许一个账号（重开=覆盖该门店的旧账号，避免同店多账号权限打架）
-    const dup = db.prepare("SELECT id FROM accounts WHERE book_id=? AND role='customer' AND customer_id=?").get(bookId, cid);
-    if (dup) return sendJSON(res, 400, { error: '该门店已开通账号（可改用重置密码）' });
+    // 多门店：优先读customer_ids[]，兼容只传 customer_id 的旧客户端
+    const ids = parseStoreIds(b.customer_ids !== undefined ? b.customer_ids : b.customer_id, true);
+    if (!ids || !ids.length) return sendJSON(res, 400, { error: '请选择要开通的门店' });
     if (db.prepare('SELECT id FROM accounts WHERE username=?').get(phone)) return sendJSON(res, 400, { error: '该手机号已被注册' });
+    const firstCust = db.prepare('SELECT * FROM customers WHERE id=? AND book_id=?').get(ids[0], bookId);
     const info = db.prepare("INSERT INTO accounts(username,password,display_name,role,book_id,customer_id,active) VALUES(?,?,?,?,?,?,1)")
-      .run(phone, hashPassword(pwd), String(b.display_name || '').trim() || cust.name, 'customer', bookId, cid);
-    db.prepare('INSERT OR IGNORE INTO account_books(account_id,book_id) VALUES(?,?)').run(info.lastInsertRowid, bookId);
-    return sendJSON(res, 200, { id: info.lastInsertRowid, phone });
+      .run(phone, hashPassword(pwd), String(b.display_name || '').trim() || firstCust.name, 'customer', bookId, ids[0]);
+    const aid = info.lastInsertRowid;
+    db.prepare('INSERT OR IGNORE INTO account_books(account_id,book_id) VALUES(?,?)').run(aid, bookId);
+    writeAccStores(aid, ids, ids[0]);
+    return sendJSON(res, 200, { id: aid, phone, customer_ids: ids });
+  }
+  // 🔴 2026-10-19 新增：改门店绑定（增/减门店）。前端「编辑客户账号」用这个。
+  m = p.match(/^\/api\/customer-accounts\/(\d+)\/stores$/);
+  if (m && method === 'PUT') {
+    if (role !== 'boss' && role !== 'manager') return sendJSON(res, 403, { error: '只有老板/经理可以修改客户账号门店' });
+    const acc = db.prepare("SELECT * FROM accounts WHERE id=? AND book_id=? AND role='customer'").get(m[1], bookId);
+    if (!acc) return sendJSON(res, 404, { error: '客户账号不存在' });
+    const b = await getBody(req);
+    const ids = parseStoreIds(b.customer_ids, true);
+    if (!ids || !ids.length) return sendJSON(res, 400, { error: '至少要保留一家门店' });
+    const defId = Number(b.customer_id) && ids.indexOf(Number(b.customer_id)) >= 0 ? Number(b.customer_id) : ids[0];
+    writeAccStores(Number(m[1]), ids, defId);
+    return sendJSON(res, 200, { ok: true, customer_ids: ids, customer_id: defId });
   }
   m = p.match(/^\/api\/customer-accounts\/(\d+)\/password$/);
   if (m && method === 'PUT') {
@@ -995,6 +1111,10 @@ async function handleApi(req, res, u) {
     if (role !== 'boss' && role !== 'manager') return sendJSON(res, 403, { error: '只有老板/经理可以删除客户账号' });
     const acc = db.prepare("SELECT * FROM accounts WHERE id=? AND book_id=? AND role='customer'").get(m[1], bookId);
     if (!acc) return sendJSON(res, 404, { error: '客户账号不存在' });
+    // 🔴 连带清门店绑定，否则 account_stores 会留孤儿行，
+    //    同一手机号重新开通时会被旧绑定悄悄授权到不该看的门店。
+    db.prepare('DELETE FROM account_stores WHERE account_id=?').run(m[1]);
+    db.prepare('DELETE FROM account_books WHERE account_id=?').run(m[1]);
     db.prepare('DELETE FROM accounts WHERE id=?').run(m[1]);
     return sendJSON(res, 200, { ok: true });
   }
@@ -1067,9 +1187,12 @@ async function handleApi(req, res, u) {
     //    名称/联系人/电话/地址/备注 —— 加上客户角色后等于直接泄底。补上。
     if (!need('customer.view')) return;
     if (isCustomer(ctx)) {
-      if (!ctx.customerId) return sendJSON(res, 200, []);
-      const me = db.prepare('SELECT * FROM customers WHERE id=? AND book_id=?').get(ctx.customerId, bookId);
-      return sendJSON(res, 200, me ? [pubCustomerFor(me)] : []);
+      // 2026-10-19：返回他负责的**全部**门店（原来只返回默认那一家，多门店时开单页选不了店）
+      const ids = ctx.customerIds || [];
+      if (!ids.length) return sendJSON(res, 200, []);
+      const ph = ids.map(() => '?').join(',');
+      const mine = db.prepare('SELECT * FROM customers WHERE book_id=? AND id IN (' + ph + ') ORDER BY id').all(bookId, ...ids);
+      return sendJSON(res, 200, mine.map(pubCustomerFor));
     }
     const q = u.searchParams.get('q') || '';
     const fw = fuzzyWhere(q, ['name', 'phone', 'contact', 'address', 'remark']);
@@ -1117,9 +1240,9 @@ async function handleApi(req, res, u) {
     let rows;
     if (fw) rows = db.prepare(sql + "AND " + fw.sql + " ORDER BY p.id DESC").all(bookId, ...fw.args);
     else rows = db.prepare(sql + "ORDER BY p.id DESC").all(bookId);
-    // 客户：换成「本店价」并剥掉成本价/库存/预警阈值
+    // 客户：换成「当前选中门店的历史送货价」并剥掉成本价/库存/预警阈值
     if (isCustomer(ctx)) {
-      const pmap = customerPriceMap(bookId, ctx.customerId);
+      const pmap = customerPriceMap(bookId, custTarget(ctx, u.searchParams.get('customer_id')));
       rows = rows.map(r => pubProductFor(r, pmap));
     }
     return sendJSON(res, 200, rows);
@@ -1207,13 +1330,21 @@ async function handleApi(req, res, u) {
   if (p === '/api/orders' && method === 'POST') {
     if (!need('sale.create')) return;
     const b = await getBody(req);
-    // 🔴 客户角色：忽略 body 里的 customer_id，强制锁成自己绑定的门店。
-    //    否则客户改一下报文就能以别的门店名义下单（还能顺手看到别店的取价）。
+    // 🔴 客户角色：body.customer_id 只在他**被授权的门店集合**里才认，
+    //    否则强制回落默认门店 —— 改报文想冒充别家门店下单是不行的。
     //    同时禁止客户提交退货单，并强制整单折扣为 1（折扣只能由商家给）。
     if (isCustomer(ctx)) {
-      if (!ctx.customerId) return sendJSON(res, 403, { error: '账号未绑定门店，请联系商家开通' });
+      if (!ctx.customerIds || !ctx.customerIds.length) return sendJSON(res, 403, { error: '账号未绑定门店，请联系商家开通' });
       if (b.type === 'return') return sendJSON(res, 403, { error: '客户账号不能提交退货单' });
-      b.customer_id = ctx.customerId;
+      // 🔴🔴 **显式传了门店就必须是他授权的**，不合法要**报错**而不是悄悄回落默认门店。
+      //    回落会造成「明明给 C 店下单、单却落进 A 店」—— 金额和历史价全错，且用户毫无察觉。
+      const want = Number(b.customer_id);
+      if (want) {
+        if (!custAllowed(ctx, want)) return sendJSON(res, 403, { error: '只能给自己负责的门店下单' });
+        b.customer_id = want;
+      } else {
+        b.customer_id = Number(ctx.customerId) || (ctx.customerIds[0] || 0);
+      }
       b.discount = 1;
     }
     if (!b.customer_id) return sendJSON(res, 400, { error: '请选择客户' });
@@ -1290,10 +1421,12 @@ async function handleApi(req, res, u) {
     const q = u.searchParams.get('q') || '';
     const dExpr = "date(COALESCE(order_date,created_at))";
     const conds = ['book_id=?']; const args = [bookId];
-    // 客户：只返回自己门店的订单（锁死，不接受前端传参绕过）
+    // 客户：只返回自己负责门店的订单（锁死，不接受前端传参绕过）
     if (isCustomer(ctx)) {
-      if (!ctx.customerId) return sendJSON(res, 200, []);
-      conds.push('customer_id=?'); args.push(ctx.customerId);
+      const ids = ctx.customerIds || [];
+      if (!ids.length) return sendJSON(res, 200, []);
+      conds.push('customer_id IN (' + ids.map(() => '?').join(',') + ')');
+      args.push(...ids);
     }
     if (status) { conds.push('status=?'); args.push(status); }
     const fw = fuzzyWhere(q, ['order_no', 'customer_name', 'remark']);
@@ -1432,8 +1565,8 @@ async function handleApi(req, res, u) {
   if (m && method === 'GET') {
     const o = db.prepare('SELECT * FROM orders WHERE id=? AND book_id=?').get(m[1], bookId);
     if (!o) return sendJSON(res, 404, { error: '订单不存在' });
-    // 🔴 客户改 URL 里的订单号就能看别家的单 → 必须校验归属
-    if (isCustomer(ctx) && (!ctx.customerId || Number(o.customer_id) !== ctx.customerId)) {
+    // 🔴 客户改 URL 里的订单号就能看别家的单 → 必须校验归属（多门店：查集合）
+    if (isCustomer(ctx) && !custAllowed(ctx, o.customer_id)) {
       return sendJSON(res, 404, { error: '订单不存在' });
     }
     const items = db.prepare('SELECT * FROM order_items WHERE order_id=?').all(m[1]);
@@ -1729,8 +1862,8 @@ async function handleApi(req, res, u) {
   // GET /api/ar/unsettled?customer_id=N  → 该门店未结清单（收款弹窗用）
   if (p === '/api/ar/unsettled' && method === 'GET') {
     if (!need('ar.view')) return;
-    // 🔴 客户：忽略传入的 customer_id，锁死成自己的门店（传别家 id 也看不到）
-    const cid = isCustomer(ctx) ? (ctx.customerId || 0) : Number(u.searchParams.get('customer_id'));
+    // 🔴 客户：传入的 customer_id 只在他授权范围内才认，否则回落默认门店（传别家 id 也看不到）
+    const cid = isCustomer(ctx) ? custTarget(ctx, u.searchParams.get('customer_id')) : Number(u.searchParams.get('customer_id'));
     if (!cid) return sendJSON(res, 400, { error: '缺少 customer_id' });
     const rows = unsettledOrders(bookId, cid).map(o => {
       const st = settleState(o); const days = daysSince(o); const term = termOf(bookId, cid);
@@ -1903,8 +2036,8 @@ async function handleApi(req, res, u) {
       // 🔴 debt 可以是**负数**（退货冲减后客户反而欠我们钱 / 我们欠他），
       //    所以过滤条件不能只写 `debt > 0.005`，否则预收门店会被整行丢掉。
     }).filter(r => r.debt > 0.005 || r.unsettled > 0 || r.debt < -0.005)
-      // 🔴 客户：只留自己门店这一行，绝不暴露其它门店的欠款
-      .filter(r => !isCustomer(ctx) || (ctx.customerId && Number(r.customer_id) === ctx.customerId))
+      // 🔴 客户：只留他负责门店的那几行，绝不暴露其它门店的欠款
+      .filter(r => !isCustomer(ctx) || ((ctx.customerIds || []).indexOf(Number(r.customer_id)) >= 0))
       .sort((a, b) => b.debt - a.debt);
     return sendJSON(res, 200, {
       rows: list,
@@ -1916,13 +2049,22 @@ async function handleApi(req, res, u) {
   // GET /api/ar/aging → 账龄分析（30天以内 / 31-60 / 61-90 / 90天以上）
   if (p === '/api/ar/aging' && method === 'GET') {
     if (!need('ar.view')) return;
-    const cid = isCustomer(ctx) ? (ctx.customerId || 0) : Number(u.searchParams.get('customer_id'));
+    const cid = isCustomer(ctx) ? 0 : Number(u.searchParams.get('customer_id'));
     const buckets = { d30: 0, d60: 0, d90: 0, d90p: 0 };
     const c30 = { n: 0, amt: 0 }, c60 = { n: 0, amt: 0 }, c90 = { n: 0, amt: 0 }, c90p = { n: 0, amt: 0 };
-    const targets = cid ? [{ customer_id: cid }] :
-      // 🔴 不按 status 过滤目标客户：只有退货单、没有正向单据的门店，
-      //    其退货抵减额也必须体现（否则账龄 total 与 summary 对不上）。
-      db.prepare('SELECT DISTINCT customer_id FROM orders WHERE book_id=?').all(bookId);
+    // 🔴 客户（多门店）：传 customer_id 也只在他授权范围内认；不传则汇总他负责的**全部**门店
+    const cIds = isCustomer(ctx)
+      ? (custAllowed(ctx, u.searchParams.get('customer_id'))
+          ? [Number(u.searchParams.get('customer_id'))]
+          : (ctx.customerIds || []))
+      : [];
+    const targets = isCustomer(ctx)
+      ? cIds.map(i => ({ customer_id: i }))
+      : (cid ? [{ customer_id: cid }] : [
+        // 🔴 不按 status 过滤目标客户：只有退货单、没有正向单据的门店，
+        //    其退货抵减额也必须体现（否则账龄 total 与 summary 对不上）。
+        ...db.prepare('SELECT DISTINCT customer_id FROM orders WHERE book_id=?').all(bookId)
+      ]);
     const detail = [];
     for (const t of targets) {
       unsettledOrders(bookId, t.customer_id).forEach(o => {
@@ -1940,9 +2082,12 @@ async function handleApi(req, res, u) {
     detail.sort((a, b) => b.days - a.days);
     // 🔴 账龄桶只装正向未结单（退货 due 为负不该占一个桶），但**总额必须减掉退货抵减**，
     //    否则这里显示的「欠款总额」会比 /api/ar/summary 大，两页对不上。
-    const rc = (cid != null && cid) ? returnCredit(bookId, cid)
-      : db.prepare("SELECT COALESCE(SUM(COALESCE(payable,total)),0) AS c FROM orders WHERE book_id=? AND status='returned'").get(bookId);
-    const returnCreditTotal = +(Number(rc && rc.c) || 0).toFixed(2);
+    // 🔴 客户（多门店）：退货抵减只能汇总他负责的门店，绝不能给全店合计（那等于泄露别家经营数据）。
+    const rcNum = isCustomer(ctx)
+      ? (cIds.length ? +cIds.reduce((s, i) => s + returnCredit(bookId, i), 0).toFixed(2) : 0)
+      : (cid ? returnCredit(bookId, cid)
+             : Number((db.prepare("SELECT COALESCE(SUM(COALESCE(payable,total)),0) AS c FROM orders WHERE book_id=? AND status='returned'").get(bookId) || {}).c) || 0);
+    const returnCreditTotal = +rcNum.toFixed(2);
     return sendJSON(res, 200, {
       return_credit: returnCreditTotal,
       buckets: [
@@ -1959,7 +2104,20 @@ async function handleApi(req, res, u) {
   // GET /api/ar/payments?customer_id=N → 收款流水
   if (p === '/api/ar/payments' && method === 'GET') {
     if (!need('ar.view')) return;
-    const cid = isCustomer(ctx) ? (ctx.customerId || 0) : (Number(u.searchParams.get('customer_id')) || 0);
+    // 🔴 客户（多门店）：cid 为空时**绝不能落到「全部流水」分支** —— 那等于把全店收款流水抖出来。
+    //    一律用授权门店集合做 IN 查询。
+    if (isCustomer(ctx)) {
+      const ids = ctx.customerIds || [];
+      if (!ids.length) return sendJSON(res, 200, { rows: [], total_in: 0, total_discount: 0 });
+      const ph = ids.map(() => '?').join(',');
+      const rws = db.prepare('SELECT * FROM payments WHERE book_id=? AND customer_id IN (' + ph + ') ORDER BY id DESC LIMIT 200').all(bookId, ...ids);
+      return sendJSON(res, 200, {
+        rows: rws.map(r => ({ ...r, total: +(Number(r.amount) + Number(r.discount)).toFixed(2) })),
+        total_in: +rws.reduce((a, r) => a + (Number(r.amount) || 0), 0).toFixed(2),
+        total_discount: +rws.reduce((a, r) => a + (Number(r.discount) || 0), 0).toFixed(2),
+      });
+    }
+    const cid = Number(u.searchParams.get('customer_id')) || 0;
     const rows = cid
       ? db.prepare('SELECT * FROM payments WHERE book_id=? AND customer_id=? ORDER BY id DESC LIMIT 200').all(bookId, cid)
       : db.prepare('SELECT * FROM payments WHERE book_id=? ORDER BY id DESC LIMIT 200').all(bookId);
@@ -2197,12 +2355,12 @@ async function handleApi(req, res, u) {
   // 开单 / 改单成功后自动记录：价格 + 整单折扣
   if (p === '/api/customer-prices' && method === 'GET') {
     if (!need('price.view')) return;
-    // 🔴 客户传别家的 customer_id 就能拿到别店的成交价 → 锁死
+    // 🔴 客户传别家的 customer_id 就能拿到别店的成交价 → 锁死（多门店：查授权集合）
     const _qCid = u.searchParams.get('customer_id');
-    if (isCustomer(ctx) && _qCid && ctx.customerId && Number(_qCid) !== ctx.customerId) {
+    if (isCustomer(ctx) && _qCid && !custAllowed(ctx, _qCid)) {
       return sendJSON(res, 403, { error: '只能查看自己门店的价格' });
     }
-    const cid = isCustomer(ctx) ? String(ctx.customerId || '') : _qCid;
+    const cid = isCustomer(ctx) ? String(custTarget(ctx, _qCid) || '') : _qCid;
     if (!cid) return sendJSON(res, 200, { prices: {}, discount: 1, has_history: false });
     const rows = db.prepare('SELECT product_id, price, discount FROM customer_prices WHERE book_id=? AND customer_id=?').all(bookId, cid);
     const prices = {}; const itemDiscounts = {};
@@ -2268,7 +2426,7 @@ async function handleApi(req, res, u) {
     if (!need('order.view')) return;
     const drows = db.prepare('SELECT * FROM deliveries WHERE book_id=? ORDER BY id DESC LIMIT 200').all(bookId);
     return sendJSON(res, 200, isCustomer(ctx)
-      ? drows.filter(r => ctx.customerId && Number(r.customer_id) === ctx.customerId) : drows);
+      ? drows.filter(r => (ctx.customerIds || []).indexOf(Number(r.customer_id)) >= 0) : drows);
   }
 
   // ---------- 设置 ----------
@@ -2463,7 +2621,9 @@ async function handleApi(req, res, u) {
 }
 
 // 对外暴露的账户/套账字段（不含密码）
-function pubAcc(a) { return { id: a.id, username: a.username, display_name: a.display_name, role: a.role, roleLabel: roleLabel(a.role), book_id: a.book_id, active: a.active, is_admin: !!a.is_admin, whitelisted: !!a.whitelisted, banned_reason: a.banned_reason || null, banned_at: a.banned_at || null, created_at: a.created_at, customer_id: a.customer_id ? Number(a.customer_id) : null }; }
+function pubAcc(a) { return { id: a.id, username: a.username, display_name: a.display_name, role: a.role, roleLabel: roleLabel(a.role), book_id: a.book_id, active: a.active, is_admin: !!a.is_admin, whitelisted: !!a.whitelisted, banned_reason: a.banned_reason || null, banned_at: a.banned_at || null, created_at: a.created_at, customer_id: a.customer_id ? Number(a.customer_id) : null,
+    // 2026-10-19 多门店：客户端（手机版）拿它渲染门店切换器
+    customer_ids: a.role === 'customer' ? custStoreIdsOf(a, a.book_id) : [] }; }
 function pubBook(b) { return b ? { id: b.id, name: b.name } : null; }
 function permsOf(role) { return can(role, '*') ? ['*'] : (ROLES[role] ? ROLES[role].perms.slice() : []); }
 function myBooks(acc) {

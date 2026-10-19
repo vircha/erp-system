@@ -198,14 +198,21 @@ class SaleViewModel : ViewModel() {
     fun loadProducts(q: String? = null) {
         viewModelScope.launch {
             try {
-                val list = ErpClient.api.products(q?.takeIf { it.isNotBlank() })
+                // 🔴 2026-10-19 客户多门店：带上当前门店，服务端才返回该店的历史价
+                val cid = if (SessionStore.isCustomer) SessionStore.saleStore.takeIf { it > 0 } else null
+                val list = ErpClient.api.products(q?.takeIf { it.isNotBlank() }, cid)
                 products = list
-                CacheStore.putProducts(list)
+                // 🔴 门店变了就别把这份价缓存下来 —— 否则下次断网会读出上一家店的价格
+                CacheStore.putProducts(list, cid)
                 offline = false
             } catch (e: Exception) {
                 offline = isNetworkError(e)
                 error = if (offline) null else e.userMessage()
-                if (products.isEmpty()) products = CacheStore.getProducts()
+                // 只有缓存属于当前门店才能用，客户切店后不能拿旧门店的价当现价
+                val cid = if (SessionStore.isCustomer) SessionStore.saleStore.takeIf { it > 0 } else null
+                if (products.isEmpty() && (cid == null || CacheStore.lastProductStore == cid)) {
+                    products = CacheStore.getProducts()
+                }
             }
         }
     }
@@ -223,6 +230,31 @@ class SaleViewModel : ViewModel() {
                     .filterKeys { it >= 0 }
                     .mapValues { it.value.coerceIn(0.1, 1.0) }
             } catch (_: Exception) { priceMap = emptyMap(); itemDiscountMap = emptyMap() }
+        }
+    }
+
+    /**
+     * 2026-10-19 客户多门店：切换当前下单门店。
+     * 门店一变，**商品价和历史价都得重载** —— 不重载就是拿上一家店的价格下单。
+     */
+    suspend fun switchStore(id: Int) {
+        if (!SessionStore.custStoreAllowed(id)) return      // 不是他的门店，直接忽略
+        if (id == selectedCustomer?.id) return
+        SessionStore.setSaleStore(id)
+        cart = emptyList()                                   // 价格全变，清掉已录入的行
+        val c = customers.firstOrNull { it.id == id }
+        selectedCustomer = c
+        priceMap = emptyMap(); itemDiscountMap = emptyMap()
+        loadProducts()
+        if (c != null) {
+            try {
+                val r = ErpClient.api.customerPrices(c.id)
+                priceMap = r.prices.mapKeys { it.key.toIntOrNull() ?: -1 }.filterKeys { it >= 0 }
+                itemDiscountMap = r.itemDiscounts
+                    .mapKeys { it.key.toIntOrNull() ?: -1 }
+                    .filterKeys { it >= 0 }
+                    .mapValues { it.value.coerceIn(0.1, 1.0) }
+            } catch (_: Exception) { }
         }
     }
 

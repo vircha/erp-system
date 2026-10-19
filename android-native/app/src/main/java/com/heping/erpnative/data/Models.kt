@@ -12,8 +12,10 @@ data class Account(
     val book_id: Int = 1,
     val active: Int = 1,
     val created_at: String? = null,
-    /** 客户账号绑定的门店 id（仅 role=customer 有值） */
-    @SerializedName("customer_id") val customerId: Int? = null
+    /** 客户账号绑定的门店 id（仅 role=customer 有值；多门店下这是**默认门店**） */
+    @SerializedName("customer_id") val customerId: Int? = null,
+    // 2026-10-19：客户下单员可负责多家门店，这里是全部门店
+    @SerializedName("customer_ids") val customerIds: List<Int> = emptyList()
 )
 
 data class Book(val id: Int = 1, val name: String = "", val role: String? = null)
@@ -29,6 +31,8 @@ data class AuthResponse(
     @SerializedName("device_token") val deviceToken: String? = null,
     // 客户下单角色：绑定的门店 id。客户登录后一切数据都以它为边界（服务端也会强制锁定）。
     @SerializedName("customerId") val customerId: Int? = null,
+    // 2026-10-19 多门店：他负责的**全部**门店。customerId 只是默认门店。
+    @SerializedName("customerIds") val customerIds: List<Int> = emptyList(),
     // 信任设备已满 4 台：本机未下发令牌，登录仍成功但不会被记住
     @SerializedName("trust_full") val trustFull: Boolean = false
 )
@@ -70,8 +74,10 @@ data class MeResponse(
     val perms: List<String> = emptyList(),
     @SerializedName("shopName") val shopName: String = "",
     val books: List<Book> = emptyList(),
-    /** 客户账号绑定的门店 id（0 = 非客户账号） */
-    @SerializedName("customerId") val customerId: Int = 0
+    /** 客户账号绑定的门店 id（0 = 非客户账号；多门店下是**默认门店**） */
+    @SerializedName("customerId") val customerId: Int = 0,
+    // 2026-10-19 多门店：他负责的全部门店，门店切换器的数据源
+    @SerializedName("customerIds") val customerIds: List<Int> = emptyList()
 )
 
 // ---------- 客户 ----------

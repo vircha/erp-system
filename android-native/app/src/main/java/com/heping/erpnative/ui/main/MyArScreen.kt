@@ -22,7 +22,9 @@ import com.heping.erpnative.vm.ArViewModel
  */
 @Composable
 fun MyArScreen(arVm: ArViewModel) {
-    val cid = SessionStore.customerId
+    // 2026-10-19 多门店：欠款页跟「开单页当前门店」保持一致。
+    //    切了门店就换一家店的欠款 —— 与客户在开单页看到的口径统一。
+    val cid = if (SessionStore.isCustomer) SessionStore.saleStore else SessionStore.customerId
     val unsettled = arVm.unsettled
     val loading = arVm.unsettledLoading
     val err = arVm.error
