@@ -1,0 +1,57 @@
+# ============================================================
+# 🔴🔴 Docker 构建上下文白名单 —— 这个文件是防泄露的最后一道闸
+# ============================================================
+#
+# 为什么必须用「先全排除、再白名单放行」而不是「逐条排除」：
+#
+#   Dockerfile 只 COPY 了白名单里的那几个文件，所以**镜像层里**不会有敏感数据。
+#   但 build context 是**整个目录原封不动传给 Docker daemon** 的 ——
+#   逐条排除一旦漏一条，本机的真实凭据就跟着上去了。
+#   逐条排除要靠人肉维护，.gitignore 加了新文件它就落后了。
+#
+#   白名单不需要维护：新增文件默认**进不去**构建上下文，
+#   只有明确放行的才进。漏写的后果从「泄密」变成「构建失败」，
+#   报错立刻可见 —— 这个方向的反转才是正确的默认值。
+#
+# ⚠️ 本机上真实存在、**绝不能进构建上下文**的东西：
+#     build.local.env   → 含真实服务器域名 + Android 签名口令
+#     .env               → 含 ERP_BOSS_PASSWORD
+#     data/              → 真实业务数据库（.db 及 -wal/-shm）
+#     uploads/           → 用户上传的反馈附件
+#     tls/               → TLS 私钥
+#     android-native/    → 含 local.properties（真实域名）与 keystore
+#
+#   注意：.gitignore 管的是 git，.dockerignore 管的是 docker，两套完全独立。
+#   .gitignore 已经排除了大部分敏感文件，但 build context 不看 .gitignore。
+
+# ---- 第一刀：全部排除 ----
+*
+
+# ---- 第二刀：放行构建必需的最小集合 ----
+# Dockerfile 本身与 .dockerignore：构建器要读它们。
+# 老版构建器要求 Dockerfile 必须位于 context 内，漏掉这两行会报
+#「unable to prepare context: Dockerfile not found」。
+!Dockerfile
+!.dockerignore
+
+# 服务端源码（与 Dockerfile 的 COPY 列表严格一致）
+!package.json
+!server.js
+!db.js
+!moderation.js
+!moderation_server.js
+!order_table.js
+!xlsx_util.js
+
+# 前端静态资源
+!public/
+!public/**
+
+# ---- 说明：compose / Caddyfile / deploy.sh 不需要进镜像 ----
+#   docker-compose.yml 与 Caddyfile 是**运行时**由 Docker Compose 在宿主机上读的，
+#   build context 里没有它们也照样能用。
+#   源码仓库里该有的文件一个不少，只是这一份不进 Docker 构建通道。
+#
+# 📌 以后往 Dockerfile 加新文件时，**这里必须同步加一行**。
+#   忘了的症状是：`COPY xxx ./` 直接构建失败（文件找不到）——
+#   属于会立刻暴露的错误，不会静默漏文件。

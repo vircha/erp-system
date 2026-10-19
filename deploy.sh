@@ -153,17 +153,56 @@ check_dns() {
 deploy() {
   mkdir -p data uploads/feedback backups
 
+  # 🔴🔴 必须把数据目录交给 uid 1001（镜像里的 erp 用户）
+  #   容器以非 root 运行，而 compose 用的是 ./data **绑定挂载** ——
+  #   绑定挂载会**覆盖**镜像里chown -R erp:erp /app 建好的目录属主，
+  #   宿主机上新建的目录属主是当前用户（常见 1000），容器里的进程就写不进去，
+  #   表现是启动即失败：SQLITE_CANTOPEN / EACCES / "unable to open database file"。
+  #   这是自己部署时最常撞的一个坑，且报错信息完全看不出「是权限问题」。
+  #
+  #   为什么不能靠「容器启动后再 chown」：那需要容器先能跑起来，而它起不来就死循环了。
+  #   必须在宿主机侧先把目录属主改对。
+  #
+  #   sudo 的必要性：当前用户通常不是 1001。Docker 有 rootless 模式时无需 sudo，
+  #   这里先试不用 sudo 的，失败再升级，避免在 rootless 环境里无谓地要密码。
+  if [ "$(id -u)" != "0" ]; then
+    SUDO='sudo'
+  else
+    SUDO=''
+  fi
+  if ! chown -R 1001:1001 data uploads 2>/dev/null; then
+    # 第一次部署往往没有 sudo 免密，会在这里等密码，属正常
+    $SUDO chown -R 1001:1001 data uploads || {
+      c_err "✗ 无法设置 data/ uploads/ 目录权限"
+      echo"     容器以非 root(uid 1001) 运行，必须让这两个目录属于 1001:1001，否则数据库打不开。"
+      echo     "  手动执行：sudo chown -R 1001:1001 ./data ./uploads"
+      exit 1
+    }
+  fi
+
   # 🔴 库已存在时，.env 里的 ERP_BOSS_* 是**不生效**的
   #   （db.js 只在首次建库时创建账号）。不提示的话，
   #   部署者会以为「我改了密码为什么还是老密码」。
   if [ -s data/erp.db ]; then
-    c_warn "!检测到已有数据库 data/erp.db"
+    c_warn "! 检测到已有数据库 data/erp.db"
     c_warn "  .env 里的 ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD **不会生效**"
     c_warn "  （它们只在首次建库时创建账号）。要改密码请登录后在「设置」页改。"
   fi
 
-  c_step '拉取镜像并启动'
-  $C up -d --build --remove-orphans
+  c_step '构建并启动'
+  # 🔴 默认本地构建（--build），因为用本仓库源码的人通常也想改点东西。
+  #    设 ERP_USE_PREBUILT=1 则改用 GitHub 上已发布的官方镜像，不本地构建：
+  #      · 省掉一台机器装 Node / 编译的时间
+  #      · 但**必须先去仓库的 Actions 页确认对应的tag 构建已通过**
+  #        （镜像没推成功时 docker pull 会失败，而不是退回构建 —— 这是故意的，
+  #          静默退回会让人以为自己在跑官方镜像，其实在跑自己编的）
+  if [ "${ERP_USE_PREBUILT:-0}" = "1" ]; then
+    c_warn "! 使用官方预构建镜像（ERP_USE_PREBUILT=1），不本地构建"
+    $C pull erp
+    $C up -d --remove-orphans --no-build
+  else
+    $C up -d --build --remove-orphans
+  fi
 
   c_step '等待服务就绪'
   local i

@@ -3,7 +3,7 @@
 # ============================================================
 # 快速开始：
 #   1. cp .env.example .env
-#   2. 编辑 .env，至少填ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD
+#   2. 编辑 .env，至少填 ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD / ERP_DOMAIN
 #   3. bash deploy.sh            ← 一条命令搞定
 #
 # 手动等价操作：
@@ -11,6 +11,14 @@
 #
 # 停止 / 重启 / 看日志：
 #   bash deploy.sh stop|restart|logs|status
+#
+# 📌 镜像从哪来：
+#   image= ghcr.io/vircha/erp-system:latest   ← GitHub 官方镜像（CI 自动发布）
+#   build: .                                   ← 源码就在旁边，仍可本地构建
+#   两者**并存**是 compose 的标准用法：
+#     · 有build: 时 `compose up` = 用源码构建，并打上 image 这个 tag
+#     · 删掉 build: 时 = 直接拉远端镜像，不本地构建（省一台机器装 Node）
+#   deploy.sh 默认走「本地构建」，因为用本仓库源码的人通常也想改点东西。
 # ============================================================
 
 services:
@@ -18,7 +26,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: erp-system:latest
+    # 🔴 官方镜像地址。GitHub Actions 每次打 v* 标签会自动构建并推这里，
+    #    内置的 GITHUB_TOKEN 自带 packages: write 权限，不需要任何额外配置。
+    #    拉取时用 docker pull ghcr.io/vircha/erp-system:5.6.6
+    image: ghcr.io/vircha/erp-system:latest
     container_name: erp-system
     restart: unless-stopped
 

@@ -56,6 +56,25 @@ bash deploy.sh stop        # 停止（保留数据）
 **必须先做的**：把域名的 A 记录指向服务器 IP，再运行脚本。
 Caddy 会自动申请并续期 Let's Encrypt 证书。
 
+#### 也可以直接用官方预构建镜像
+
+不想在服务器上装 Node、自己构建的话，直接拉 GitHub 上已经编好的镜像：
+
+```bash
+docker pull ghcr.io/vircha/erp-system:latest
+
+# 或者在 .env 里设ERP_USE_PREBUILT=1，然后照常 bash deploy.sh
+# 脚本会改成「拉取 + 启动」，不再本地构建
+```
+
+镜像由仓库的 CI 在每次打 `v*` 标签时自动构建并推送，同时提供
+**linux/amd64 与 linux/arm64** 两个架构（ARM 软路由、ARM 云服务器直接可用）。
+每次推送前CI 都会把镜像真正跑起来做一轮冒烟测试（登录 + 建库 + 静态资源），
+测试不过就不会发布。
+
+镜像里的内容与源码仓库完全一致，**不含任何预置的账号密码或业务数据**——
+管理员账号由你自己在 `.env` 里指定。
+
 ### 方式二：裸机部署（无 Docker）
 
 ```bash
@@ -311,9 +330,10 @@ keytool -genkeypair -v -keystore release-key.jks   -alias my-erp -keyalg RSA -ke
 │   └── img/                 # PWA / favicon 图标
 │
 ├── android-native/          # 原生 Android 工程（Kotlin + Compose）
-├── .github/workflows/       # 打 v* tag 自动构建 APK 并建 Release
+├── .github/workflows/       # 打 v* tag 自动构建 APK 建Release / 推 Docker 镜像
 │
 ├── Dockerfile               # 精简镜像（node:22-alpine，零 npm 依赖）
+├── .dockerignore            # 🔴 构建上下文白名单（防真实凭据进镜像）
 ├── docker-compose.yml       # ERP + Caddy(HTTPS) 双容器编排
 ├── Caddyfile                # 自动签发/续期 HTTPS 证书
 ├── deploy.sh                # 🔵 Docker 一键部署（主推）
