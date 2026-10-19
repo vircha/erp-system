@@ -93,30 +93,68 @@ for (const mip of ['ic_launcher.xml', 'ic_launcher_round.xml']) {
   }
 }
 
-// ---------- 3. 关键检查：Android 图标是否会被 gitignore 吞掉 ----------
+// ---------- 3. 关键检查：Android 图标是否真的会进仓库 ----------
+// 🔴🔴 这项要查两种情况，缺一不可：
+//   ① 未跟踪文件被 .gitignore 排除（git ls-files --others --ignored）
+//   ② 文件压根不在 git 索引里（git ls-files 对不上）
+//   只查① 会漏掉「本地已被 git add 过、后来改了 .gitignore」的假象 ——
+//   因为文件已在索引里，git 就不再把它当「被忽略」了。
 const { execFileSync } = await import('node:child_process');
-try {
-  const ignored = execFileSync(
-    'git',
-    ['ls-files', '--others', '--ignored', '--exclude-standard', '--', ROOT],
-    { encoding: 'utf8' }
-  )
-    .split('\n')
-    .filter(Boolean)
-    .filter((p) => /\.(png|webp|xml)$/.test(p));
-  if (ignored.length) {
+const git = (...args) => {
+  try {
+    return execFileSync('git', args, {
+      encoding: 'utf8',
+      cwd: path.join(__dirname, '..', '..'),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return null; // 不在 git 仓库里
+  }
+};
+
+// 归一化成仓库根相对路径（Windows 上 git 用 /，本脚本拼路径用 \）
+const toRepoRel = (abs) => {
+  const repoRoot = path.join(__dirname, '..', '..');
+  return path.relative(repoRoot, abs).replace(/\\/g, '/');
+};
+
+const ignored = git('ls-files', '--others', '--ignored', '--exclude-standard', '--', toRepoRel(ROOT));
+if (ignored && ignored.length) {
+  const imgs = ignored.filter((p) => /\.(png|webp)$/.test(p));
+  if (imgs.length) {
     problems.push(
-      `🔴 有 ${ignored.length} 个 res 资源被 .gitignore 排除（本地构建能过、CI 必失败）：\n` +
-        ignored
+      `🔴 有 ${imgs.length} 个 res 图片被 .gitignore 排除（本地构建能过、CI 必失败）：\n` +
+        imgs
           .slice(0, 8)
-          .map((p) => `      ${p.replace(/\\/g, '/')}`)
+          .map((p) => `      ${p}`)
           .join('\n') +
-        (ignored.length > 8 ? `\n      ... 还有 ${ignored.length - 8} 个` : '') +
+        (imgs.length > 8 ? `\n      ... 还有 ${imgs.length - 8} 个` : '') +
         `\n      修法：.gitignore 里放行 !android-native/app/src/main/res/**`
     );
   }
-} catch {
-  /* 不在 git 仓库里就跳过这项检查 */
+}
+
+// ② 更关键：res 下应有的图片，是否都在 git 索引里
+const tracked = git('ls-files', '--', toRepoRel(ROOT));
+if (tracked) {
+  const trackedSet = new Set(tracked);
+  const shouldBeTracked = files.filter(
+    (f) => /\.(png|webp|xml)$/.test(f) && !f.includes(`${path.sep}build${path.sep}`)
+  );
+  const missing = shouldBeTracked.filter((f) => !trackedSet.has(toRepoRel(f)));
+  if (missing.length) {
+    problems.push(
+      `🔴 有 ${missing.length} 个 res 资源不在 git 索引里（别人克隆后会缺文件）：\n` +
+        missing
+          .slice(0, 8)
+          .map((p) => `      ${toRepoRel(p)}`)
+          .join('\n') +
+        (missing.length > 8 ? `\n      ... 还有 ${missing.length - 8} 个` : '') +
+        `\n      修法：git add -f android-native/app/src/main/res/`
+    );
+  }
 }
 
 // ---------- 4. 未被任何 XML 引用的 PNG（提示级，容易是遗留垃圾）----------

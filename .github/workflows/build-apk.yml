@@ -81,6 +81,15 @@ jobs:
           EOF
           echo "has_ks=true" >> "$GITHUB_OUTPUT"
 
+      - name: 资源自检（拦截「本地过、CI 挂」）
+        working-directory: ./android-native
+        run: |
+          # 🔴 .gitignore 的 *.png 一旦误伤 res/ 图标，本机gradle 能过、
+          #    但 CI 检出后没有这些文件，AAPT 会报
+          #    「resource drawable/ic_launcher_background not found」。
+          #    提前在这里报错，日志比 AAPT 的报错友好得多。
+          node scripts/check-res.mjs
+
       - name: 构建 APK
         working-directory: ./android-native
         env:

@@ -104,6 +104,49 @@ android {
     }
 }
 
+// 🔴🔴 资源自检：拦住「本地能过、CI 失败」的坑（2026-10-19 真实事故）
+//
+//   .gitignore 里的 *.png 曾把 25 个应用图标（drawable-*/mipmap-*）全部排除。
+//   本机 assembleRelease 照常成功（文件在磁盘上），
+//   但 GitHub Actions 检出仓库后没有这些文件，直接报：
+//     AAPT: error: resource drawable/ic_launcher_background not found
+//
+//   挂到 preBuild 上，让任何构建入口（本地 / CI / 手动 gradlew）都先过这道关。
+tasks.register('checkRes') {
+    description = '校验 Android res 资源完整性（引用是否存在、是否被 gitignore 吞掉）'
+    group = 'verification'
+    doLast {
+        def script = file("${rootDir}/scripts/check-res.mjs")
+        if (!script.exists()) {
+            throw new GradleException("找不到资源自检脚本：${script}")
+        }
+        def stdout = new ByteArrayOutputStream()
+        def stderr = new ByteArrayOutputStream()
+        def result = exec {
+            commandLine 'node', script.absolutePath
+            workingDir rootDir
+            standardOutput = stdout
+            errorOutput = stderr
+            ignoreExitValue = true
+        }
+        def out = stdout.toString('UTF-8')
+        def err = stderr.toString('UTF-8')
+        if (out.trim()) logger.lifecycle(out.trim())
+        if (result.exitValue != 0) {
+            // 前置检查失败时 Gradle 自己的报错很啰嗦，这里直接把根因顶出来
+            throw new GradleException(
+                "\n🔴 资源自检未通过，构建已中止。\n" +
+                (err ?: out).trim() +
+                "\n（典型原因：.gitignore 的 *.png 误伤了 res/ 下的图标，" +
+                "本机能过但 CI 检出会失败）\n")
+        }
+    }
+}
+
+tasks.named('preBuild') {
+    dependsOn 'checkRes'
+}
+
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
