@@ -480,10 +480,13 @@ seed();
 
 // 默认密码持续告警：只要库里 admin 账号仍是默认密码，每次启动都提醒一次。
 // 只比对哈希、不打印明文，避免日志里再泄一次。
+// （注意：若库里存在 admin，说明它可能是历史上用默认账号建的，与本次
+//   ERP_BOSS_USERNAME 无关 —— 提示语里已说明「登录后到设置页改」。）
 try {
   const a = db.prepare("SELECT username, password FROM accounts WHERE username='admin'").get();
   if (a && verifyPassword && verifyPassword('admin123', a.password)) {
     console.log('⚠️  安全告警：账号 admin 仍在使用默认密码 admin123，请到「设置」页修改。');
+    console.log('   （这个账号是历史上用默认凭据创建的；改 ERP_BOSS_* 环境变量不会影响它）');
   }
 } catch (e) { /* verifyPassword 未导出时静默跳过 */ }
 

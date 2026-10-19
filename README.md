@@ -26,14 +26,71 @@
 
 ## 快速开始
 
+### 方式一：Docker 一键部署（推荐）
+
 ```bash
 git clone <你的仓库地址>
 cd <仓库名>
-cp .env.example .env      # 按注释填写
+cp .env.example .env
+vi .env                # 填 ERP_DOMAIN / ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD
+bash deploy.sh         # 就这一条命令
+```
+
+脚本会自己完成：环境检查 → 配置校验 → 域名解析预检 → 构建镜像 →
+启动服务 → 健康检查 → 打印访问地址。
+
+> `deploy.sh` 会**拒绝**用默认弱口令 `admin123` 部署，
+> 也不会把 3000 端口暴露到公网（只经 Caddy 走 HTTPS）。
+
+常用命令：
+
+```bash
+bash deploy.sh status      # 看状态与健康检查
+bash deploy.sh logs        # 看日志
+bash deploy.sh backup      # 备份数据库到 backups/
+bash deploy.sh restore backups/erp_20261019_030000.db   # 恢复
+bash deploy.sh restart     # 重启
+bash deploy.sh stop        # 停止（保留数据）
+```
+
+**必须先做的**：把域名的 A 记录指向服务器 IP，再运行脚本。
+Caddy 会自动申请并续期 Let's Encrypt 证书。
+
+### 方式二：裸机部署（无 Docker）
+
+```bash
+git clone <你的仓库地址> /opt/erp
+cd /opt/erp
+sudo -E bash deploy-systemd.sh
+```
+
+脚本会安装 Node 22、创建系统用户、注册 systemd 服务并设置开机自启，
+最后提示你如何用 Caddy 或 nginx 配 HTTPS。
+
+| | Docker 方案 | 裸机方案 |
+|---|---|---|
+| 一条命令搞定 | ✅ | 需要先 `git clone` 到 `/opt/erp` |
+| 开机自启 | ✅ | ✅ |
+| 数据持久化 | `./data`、`./uploads` 目录挂载 | 同左（`ReadWritePaths` 已放开） |
+| 升级 | `git pull && bash deploy.sh` | `sudo bash deploy-systemd.sh` |
+| 占用资源 | 略高（多一层容器） | 更省 |
+| 迁移到别的机器 | 拷 `data/` 即可 | 同左 |
+
+> ⚠️ **数据只在 `./data/` 和 `./uploads/` 两个目录里。**
+> 迁移或备份时只需带走它们（数据库是 SQLite 单文件，含 `-wal` / `-shm`）。
+
+### 方式三：手动运行（开发调试用）
+
+```bash
+cp .env.example .env      # 至少填 ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD
 node server.js
 ```
 
-首次启动会自动建库并写入演示数据。
+数据库文件默认落在 `data/erp.db`（已被 `.gitignore` 排除）。
+
+> 🔴 **只在本地开发时这样跑。** 生产必须走 HTTPS：原生 App 从 v4.7 起
+> 强制 https，明文 HTTP 直接连不上；网页端的 Service Worker 和蓝牙打印
+> 也只在安全上下文下可用。
 
 ### 🔴 默认管理员账号
 
@@ -79,22 +136,31 @@ node server.js
 
 | 变量 | 作用 | 默认 |
 |---|---|---|
-| `PORT` | 监听端口 | `3000` |
+| `ERP_DOMAIN` | 部署域名（**部署必填**，Caddy 据此签证书） | 无 |
+| `ERP_BOSS_USERNAME` / `ERP_BOSS_PASSWORD` | 初始套账老板账号 | `admin` / `admin123`（**务必改**） |
+| `PORT` | 监听端口（Docker 方案固定 3000，由 Caddy 反代） | `3000` |
 | `ERP_BIND` | 监听地址 | `0.0.0.0` |
 | `ERP_CORS_ORIGINS` | 允许的跨域来源（逗号分隔） | 空（仅同源） |
-| `ERP_BOSS_USERNAME` / `ERP_BOSS_PASSWORD` | 初始套账老板账号 | `admin` / `admin123`（**务必改**） |
 | `ERP_ADMIN_ACCOUNTS` | 平台管理员（逗号分隔） | 空（不授予） |
 | `ERP_WHITELIST_ACCOUNTS` | 永久豁免内容检测的账号 | 空 |
 | `ERP_IP_FAIL_LIMIT` / `ERP_IP_FAIL_WINDOW` | 登录失败限流 | `30` / `600000`ms |
 
 **没有内置账号体系之外的任何密钥。** 对象存储、企业微信通知等集成全部走环境变量，不配就不启用。
 
+> 📌 `.env` 里的值**按整行右半段读取**（与 systemd `EnvironmentFile` 相同的规则），
+> 所以密码里可以包含 `#` 和空格。若你手动用 `source .env` 加载，
+> 反而会被 shell 截断 —— 部署脚本已规避这个坑。
+
 ## 部署建议
 
-1. 服务端口只监听 `127.0.0.1`，前面挂 nginx / Caddy 做 HTTPS 反代
-2. 配置 HTTPS 证书（80mm 小票场景手机端必须 HTTPS）
-3. `AndroidManifest` 里的 `network_security_config.xml` **默认不放行任何明文域名**，需要时自行填
-4. 数据库文件定期备份，注意不要连`-wal` / `-shm` 一起丢
+1. **服务端口只监听 `127.0.0.1`（或容器内网），前面挂 nginx / Caddy 做 HTTPS 反代**
+   —— Docker 方案的 `docker-compose.yml` 已按此配置，`erp` 容器没有 `ports` 映射
+2. **必须 HTTPS**：原生 App 强制 https；网页端的 Service Worker、蓝牙打印也只在安全上下文下可用
+3. `network_security_config.xml` **默认不放行任何明文域名**，需要时自行填
+4. **定期备份 `data/` 目录**，注意 SQLite 的 `-wal` / `-shm` 也要一起处理
+   （用 `bash deploy.sh backup` 会自动用 `VACUUM INTO` 生成一致快照，不会有这个问题）
+5. **证书必须持久化**：Caddy 的证书与账号信息存在 Docker volume 里，
+   删掉 volume 会触发 Let's Encrypt 速率限制，之后很难再申请到证书
 
 ---
 
@@ -172,26 +238,47 @@ git push origin v1.0.0
 
 ```
 .
-├── server.js              # HTTP 服务与全部 API 路由
-├── db.js                  # SQLite 结构定义、密码哈希、种子数据
-├── xlsx_util.js# Excel 生成/解析（零依赖自研实现）
-├── order_table.js         # 订单表格与打印数据组装
-├── moderation_server.js   # 内容审核服务端
-├── moderation.js          # 内容审核前端
-├── app.js                 # 前端主逻辑
-├── index.html# 单页入口
-├── style.css / login.css / print_template.css / feedback.css
-├── print_template.js      # 打印模板编辑器
-├── receipt_preview.js     # 小票预览
-├── order_table.js# 订单表格
-├── feedback.js            # 意见反馈
-├── apk_download.js        # APK 下载二维码
-├── qrcode-mini.js         # 精简二维码生成
-├── sw.js                  # Service Worker（改前端静态文件后须 bump CACHE）
-├── android-native/        # 原生 Android 工程
+├── server.js                # HTTP 服务与全部 API 路由
+├── db.js                    # SQLite 结构定义、密码哈希、种子数据
+├── xlsx_util.js             # Excel 生成/解析（零依赖自研实现）
+├── order_table.js           # 订单表格与打印数据组装
+├── moderation_server.js     # 内容审核服务端接线
+├── moderation.js            # 内容检测规则
+│
+├── public/                  # ← 全部前端静态资源由这里提供
+│   ├── index.html           # 单页入口
+│   ├── privacy.html         # 隐私政策
+│   ├── sw.js                # Service Worker（改前端后须 bump CACHE）
+│   ├── css/
+│   │   ├── style.css        # 主样式
+│   │   ├── login.css        # 登录页
+│   │   ├── print_template.css
+│   │   └── feedback.css
+│   ├── js/
+│   │   ├── app.js           # 前端主逻辑
+│   │   ├── print_template.js  # 打印模板编辑器
+│   │   ├── receipt_preview.js # 小票预览
+│   │   ├── feedback.js      # 意见反馈
+│   │   ├── apk_download.js  # APK 下载二维码
+│   │   ├── qrcode-mini.js   # 精简二维码生成
+│   │   └── moderation.js
+│   └── img/                 # PWA / favicon 图标
+│
+├── android-native/          # 原生 Android 工程（Kotlin + Compose）
+├── .github/workflows/       # 打 v* tag 自动构建 APK 并建 Release
+│
+├── Dockerfile               # 精简镜像（node:22-alpine，零 npm 依赖）
+├── docker-compose.yml       # ERP + Caddy(HTTPS) 双容器编排
+├── Caddyfile                # 自动签发/续期 HTTPS 证书
+├── deploy.sh                # 🔵 Docker 一键部署（主推）
+├── deploy-systemd.sh        # ⚪ 裸机一键部署（无 Docker 时）
 ├── .env.example
+├── README.md
 └── CHANGELOG.md
 ```
+
+> 🔴 **运行时产物（不入库）**：`data/`（SQLite 数据库，含 `-wal` / `-shm`）、
+> `uploads/`（反馈附件）、`backups/`、`tls/`、`.env`、`node_modules/`。
 
 ## 安全说明
 

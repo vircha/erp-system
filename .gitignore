@@ -12,8 +12,10 @@ package-lock.json.bak
 *.db-shm
 data/
 backup/
+backups/          # deploy.sh backup 产出的数据库快照（含全部业务数据）
 
-# ---- TLS 证书与私钥 ----
+# ---- 用户上传与本地证书 ----
+uploads/          # 意见反馈附件
 tls/
 *.pem
 *.key
@@ -67,7 +69,10 @@ _verify*.js
 _qr*.js
 *.log
 *.out
+# 🔴 截图类 png 一律忽略，但**必须放行站点自己的图标**，
+#    否则 PWA / favicon 会整个丢失（页面图标 404）。
 *.png
+!public/img/*.png
 !docs/**/*.png
 
 # ---- 编辑器 / 系统 ----

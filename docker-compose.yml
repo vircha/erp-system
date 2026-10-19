@@ -1,0 +1,114 @@
+# ============================================================
+# ERP 系统一键部署（Docker Compose）
+# ============================================================
+# 快速开始：
+#   1. cp .env.example .env
+#   2. 编辑 .env，至少填ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD
+#   3. bash deploy.sh            ← 一条命令搞定
+#
+# 手动等价操作：
+#   docker compose up -d --build
+#
+# 停止 / 重启 / 看日志：
+#   bash deploy.sh stop|restart|logs|status
+# ============================================================
+
+services:
+  erp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: erp-system:latest
+    container_name: erp-system
+    restart: unless-stopped
+
+    # 只监听容器内网，由前面的 caddy 反代出去。
+    # 🔴 不要写 0.0.0.0:3000:3000 映射到宿主机 —— 那等于把无 HTTPS 的
+    #    管理后台直接暴露到公网，登录密码和订单金额都是明文传输。
+    expose:
+      - "3000"
+
+    environment:
+      PORT: "3000"
+      ERP_BIND: "0.0.0.0"
+      ERP_BOSS_USERNAME: ${ERP_BOSS_USERNAME:?请在 .env 里设置 ERP_BOSS_USERNAME}
+      ERP_BOSS_PASSWORD: ${ERP_BOSS_PASSWORD:?请在 .env 里设置 ERP_BOSS_PASSWORD}
+      ERP_ADMIN_ACCOUNTS: ${ERP_ADMIN_ACCOUNTS:-}
+      ERP_CORS_ORIGINS: ${ERP_CORS_ORIGINS:-}
+      ERP_IP_FAIL_LIMIT: ${ERP_IP_FAIL_LIMIT:-30}
+      ERP_IP_FAIL_WINDOW: ${ERP_IP_FAIL_WINDOW:-600000}
+      ERP_MODERATION_GRACE: ${ERP_MODERATION_GRACE:-30}
+      TZ: ${TZ:-Asia/Shanghai}
+
+    volumes:
+      # 🔴 数据库（含 -wal / -shm）。备份时要连这三个文件一起拷，
+      #    只拷 erp.db 会丢掉尚未 checkpoint 的事务。
+      - ./data:/app/data
+      # 意见反馈附件
+      - ./uploads:/app/uploads
+      # TLS 证书（网页版蓝牙/USB 打印需要，走 HTTPS 时）
+      - ./tls:/app/tls:ro
+
+    networks:
+      - erpnet
+
+    healthcheck:
+      test: ["CMD", "node", "-e",
+             "require('http').get('http://127.0.0.1:3000/api/me',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # HTTPS 反代 + 自动证书
+  # ------------------------------------------------------------
+  # 为什么必须用 HTTPS：原生 App 从 v4.7 起强制 https，明文 HTTP 直接连不上；
+  # 网页端的 Service Worker、蓝牙打印也只在安全上下文下可用。
+  caddy:
+    image: caddy:2-alpine
+    container_name: erp-caddy
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"        # HTTP/3
+
+    environment:
+      # 🔴 填你的域名。必须是真实可解析到本服务器的域名，
+      #    否则证书申请会失败（会用自签证书，浏览器报警告）。
+      #    还没买域名想先试：注释掉 Caddy 的 80/443 映射，
+      #    把 Caddyfile 里 {$ERP_DOMAIN} 段注释、改用 :8080 那段，
+      #    然后用 http://服务器IP:8080 访问（仅内网测试用）。
+      ERP_DOMAIN: ${ERP_DOMAIN:?请在 .env 里设置 ERP_DOMAIN（你的域名）}
+      # 邮箱用于 Let's Encrypt 到期提醒，填了更安心
+      ACME_EMAIL: ${ACME_EMAIL:-}
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 证书与账号信息必须持久化，否则每次重建容器都要重新申请证书，
+      # 很快会触发 Let's Encrypt 的速率限制。
+      - caddy_data:/data
+      - caddy_config:/config
+
+    networks:
+      - erpnet
+
+    depends_on:
+      erp:
+        condition: service_healthy
+
+networks:
+  erpnet:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,60 @@
+# ============================================================
+# Caddy 自动 HTTPS 反向代理
+# ============================================================
+# 把 ERP_DOMAIN 换成你的域名，Caddy 会自动申请并续期 Let's Encrypt 证书。
+
+{
+	email {$ACME_EMAIL}
+	# 中文路径/文件名编码（商品名、门店名可能有中文）
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-X-Frame-Options "SAMEORIGIN"
+	}
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# HTTP 一律跳 HTTPS（ACME 验证路径除外，Caddy 内部自动处理）
+{$ERP_DOMAIN} {
+	encode zstd gzip
+
+	# 上传反馈附件可能稍大
+	request_body {
+		max_size 20MB
+	}
+
+	# 小票图片 / APK 下载可能较大，且不该压缩（已是压缩格式）
+	@binary path_regexp download \.(apk|png|jpg|ico)$
+	handle @binary {
+		header Cache-Control "public, max-age=300"
+		reverse_proxy erp:3000
+	}
+
+	# 其余请求
+	handle {
+		# Service Worker 不能被缓存，否则前端改了用户永远看不到
+		@sw path /sw.js
+		header @sw Cache-Control "no-cache, must-revalidate"
+		header @sw Service-Worker-Allowed "/"
+
+		# HTML 同样不缓存
+		@html path *.html /
+		header @html Cache-Control "no-cache, must-revalidate"
+
+		# 静态资源短缓存（文件名里没版本号，靠重新验证保证更新生效）
+		@static path_regexp \.(css|js)$
+		header @static Cache-Control "public, max-age=0, must-revalidate"
+
+		reverse_proxy erp:3000
+	}
+}
+
+# 下面这段用于「还没配域名、只想本地试一下」的场景：
+# 把上面的 {$ERP_DOMAIN} 整段注释掉，改用下面这段，然后用 http://服务器IP:8080 访问。
+#
+# :8080 {
+# 	reverse_proxy erp:3000
+# }
