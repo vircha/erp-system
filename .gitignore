@@ -10,13 +10,26 @@ package-lock.json.bak
 *.db-journal
 *.db-wal
 *.db-shm
-data/
-backup/
-backups/          # deploy.sh backup 产出的数据库快照（含全部业务数据）
+# 🔴🔴 目录规则必须用前导 / 锚定到仓库根，否则会匹配任意层级。
+#   写 `data/` 会连Android 源码包
+#   `android-native/.../com/heping/erpnative/data/`（4 个 .kt）一起吞掉 ——
+#   本机能编译通过，CI 检出后直接报「Unresolved reference」。
+#   前导 / 表示「只匹配根目录下这一层」。
+#
+# 🔴🔴 另一条铁律：**本文件不支持行尾注释**。
+#   写 `uploads/    # 意见反馈附件` 时，git 会把`# 意见反馈附件`
+#   一起当成路径去匹配，规则直接失效（目录不再被忽略）。
+#   注释必须独占一行。
+/data/
+/backup/
+# deploy.sh backup 产出的数据库快照（含全部业务数据）
+/backups/
 
 # ---- 用户上传与本地证书 ----
-uploads/          # 意见反馈附件
-tls/
+# 意见反馈附件（锚定根目录，避免误伤同名子目录）
+/uploads/
+# 本地 TLS 证书（锚定根目录）
+/tls/
 *.pem
 *.key
 *.crt
@@ -57,11 +70,11 @@ backup_db.py
 ocr.ps1
 
 # ---- 测试与临时产物 ----
-_regress/
-_webtest/
-_tmp/
-_archive/
-ocr_prep/
+/_regress/
+/_webtest/
+/_tmp/
+/_archive/
+/ocr_prep/
 _regress.js
 _probe*.js
 _test_*.js
