@@ -86,3 +86,8 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ---- 本地临时文件 ----
+*.keep
+*.orig
+*.rej
