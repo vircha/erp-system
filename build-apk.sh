@@ -38,6 +38,80 @@ c_dim()  { printf '%s  %s%s\n' "$DIM" "$*" "$RST"; }
 
 die() { c_err "$*"; exit 1; }
 
+
+# ============================================================================
+#  🔴🔴 JDK 探测（不加这段，Windows 上大概率构建失败）
+# ============================================================================
+#
+#  为什么需要：
+#   Gradle 官方兼容性矩阵里 **JDK 25 那一行是空的** —— 8.14 不支持，
+#   要Gradle 9.1+ 才行。而 Android Studio 自带的 jbr 会自动升级到 25，
+#   于是「IDE 里明明能编，命令行就是编不过」，非常费解。
+#   报错长这样：Unsupported class file major version 69（69 = Java 25）
+#
+#  为什么不在这里直接钉死 JDK 21：
+#   JDK 路径是**每台机器不一样**的，写死别人的仓库会在别人机器上失效。
+#   所以这里做「探测 + 允许覆盖」，顺序是：
+#     1) ERP_JAVA_HOME 环境变量（想指定就指定，最优先）
+#     2) 本机常见的 JDK 21/17 安装位置
+#     3) 当前 JAVA_HOME
+#     4) Android Studio 自带的 jbr（可能是 25，会失败）
+#
+#  Android Studio 自己**只能**用它自带的 jbr，所以 IDE 里点 Build APK 仍然会失败 ——
+#  这是Gradle 版本决定的，没有「两边都搞定」的解，除非升Gradle 9.1 + AGP 9 + SDK 36。
+#  命令行出包则完全没问题。
+# ============================================================================
+java_major() { # 打印 java 主版本号，失败输出 0
+  local jh="${1:-}"
+  [ -x "$jh/bin/java" ] || return 0
+  "$jh/bin/java" -version 2>&1 | awk -F'"' '/version/{split($2,a,"."); print (a[1]=="1" ? a[2] : a[1]); exit}'
+}
+
+pick_java_home() {
+  local cands=() c m
+  [ -n "${ERP_JAVA_HOME:-}" ] && cands+=("$ERP_JAVA_HOME")
+  # Windows 上JDK 的常见安装位置（Git Bash 能认 /c/... 这种路径）
+  for d in "/c/Program Files/Java" "/c/Program Files/Eclipse Adoptium" \
+           "/c/Program Files/Microsoft" "/c/Program Files/Zulu" \
+           "$HOME/jdk21" "$HOME/jdk" \
+           "/c/Users/$USERNAME/.gradle/jdks"; do
+    [ -d "$d" ] || continue
+    for sub in "$d"/*/bin/java "$d"/*/bin/java.exe; do
+      # 往上退两层拿到 JDK 根目录
+      sub=$(dirname "$(dirname "$sub")")
+      [ -d "$sub" ] && cands+=("$sub")
+    done
+  done
+  [ -n "${JAVA_HOME:-}" ] && cands+=("$JAVA_HOME")
+  for d in "/c/Program Files/Android/Android Studio/jbr"; do
+    [ -d "$d" ] && cands+=("$d")
+  done
+
+  for c in "${cands[@]}"; do
+    m=$(java_major "$c")
+    # Gradle 8.14 支持 17~24。优先选 21，其次 17。
+    if [ "$m" = "21" ] || [ "$m" = "17" ] || [ "$m" = "23" ] || [ "$m" = "24" ]; then
+      printf '%s' "$c"; return 0
+    fi
+  done
+  # 没有合适的就返回当前 JAVA_HOME，让Gradle 自己报错（信息更准确）
+  printf '%s' "${JAVA_HOME:-}"
+}
+
+_mh=$(pick_java_home)
+if [ -z "$_mh" ] || [ ! -x "$_mh/bin/java" ]; then
+  c_warn "没找到任何 JDK。请装一个 JDK 17 或 21，或设 ERP_JAVA_HOME 指向你的 JDK。"
+  die  "无法继续构建"
+fi
+_mj=$(java_major "$_mh")
+if [ "$_mj" -ge 25 ] 2>/dev/null; then
+  c_warn "找到的 JDK 是 $_mj（$_mh）—— Gradle 8.14 不支持 25，会报 major version 69。"
+  c_warn "装一个 JDK 21（推荐 Temurin 21）后重试，或设 ERP_JAVA_HOME 指向它。"
+  die  "JDK 版本过低，请改用 JDK 17/21"
+fi
+export JAVA_HOME="$_mh"
+c_dim "JAVA_HOME = $_mh（Java $_mj）"
+
 # ---------------------------------------------------------------------------
 # 1. 读取配置
 # ---------------------------------------------------------------------------
