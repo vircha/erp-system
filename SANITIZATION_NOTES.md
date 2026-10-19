@@ -121,3 +121,44 @@ sdk.dir=/path/to/Android/Sdk
 4. **重新生成 Android 签名体系**（旧签名口令已视为公开；新密钥备份到离线介质）
 5. **清理线上遗留的测试账号**
 6. 若曾经把这份代码推到过**其它公开托管平台**，需一并清理历史记录
+## 八、🔴 `.gitignore` 的 `*.png` 曾吞掉 25 个 Android 图标（2026-10-19）
+
+这是开源发布当天 GitHub Actions 首次构建就**失败**的原因，值得完整记录：
+
+**现象**
+
+```
+ERROR: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml:3:
+  AAPT: error: resource drawable/ic_launcher_background not found
+```
+
+**根因**：`.gitignore` 为了排除截图写了 `*.png`，但**忘了给 Android 资源目录开口子**。
+结果 25 个应用图标（`drawable-hdpi` ~ `drawable-xxxhdpi` 的三个图+ `mipmap-*` 两个图）
+只存在于本机磁盘，**从未进过 git 仓库**。
+
+**为什么本机测不出来**
+
+| 环境 | 结果 | 原因 |
+|---|---|---|
+| 本机 `assembleRelease` |✅ 成功 | 文件在磁盘上，Gradle 不管它有没有进仓库 |
+| CI `actions/checkout` | ❌ 失败 | 检出的是仓库内容，磁盘上没有那些 png |
+
+**这条的通用教训**：**「本地能构建」不等于「仓库能构建」**。
+凡是 `.gitignore` 里有大范围通配（`*.png` / `*.log` / `*.tmp`）的项目，
+都必须额外验证「从干净克隆构建一次」。
+
+**修复与防复发**
+
+1. `.gitignore` 放行：`!android-native/app/src/main/res/**/*.png`
+2. 新增 `android-native/scripts/check-res.mjs`，同时校验三件事：
+   - XML 里的 `@drawable/` `@mipmap/` 引用在 `res/` 下真实存在
+   - `res/` 下的资源**没有**被 `.gitignore` 排除
+   - `res/` 下的资源**都在 git 索引里**（这条最容易被忽略，见下）
+3. 挂到 Gradle `preBuild` 与 CI 的构建前步骤，任何入口都会先跑
+
+**🔴 第三条检查为什么必须有**
+
+一开始只写了「查是否被 gitignore 排除」，测试时**误判通过**：
+文件一旦被 `git add` 过，git 就不再把它视为「被忽略的未跟踪文件」，
+`git ls-files --others --ignored` 自然列不出来。必须再查一遍
+`git ls-files` 索引，才能发现「本地有、仓库没有」。
