@@ -162,3 +162,64 @@ ERROR: app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml:3:
 文件一旦被 `git add` 过，git 就不再把它视为「被忽略的未跟踪文件」，
 `git ls-files --others --ignored` 自然列不出来。必须再查一遍
 `git ls-files` 索引，才能发现「本地有、仓库没有」。
+
+## 九、🔴 同一条通配符吃源码，**当天发作了两次**
+
+第二个 bug 是第一个的翻版，值得单列 —— 它证明这不是偶发手滑。
+
+**现象**（GitHub Actions 第二次构建）
+
+```
+e: .../ui/main/OrdersViewModel.kt:22:19 Unresolved reference: isNetworkError
+e: .../ui/main/SaleViewModel.kt:  Unresolved reference: isNetworkError
+```
+
+**根因**：`.gitignore` 里的 `data/`（本意排除运行时数据库目录）
+把 Kotlin 源码包 `com/heping/erpnative/data/` 的**全部 4 个 `.kt`** 吞掉了 ——
+`Api.kt` / `CacheStore.kt` / `Crypto.kt` / `Models.kt`。
+`isNetworkError` 定义在 `Api.kt` 里，所以所有引用它的 ViewModel 全都编不过。
+
+**两次 bug 的对照**
+
+| | 第一次 | 第二次 |
+|---|---|---|
+| 规则 | `*.png` | `data/` |
+| 被吞的东西 | 25 个应用图标 | 4 个 Kotlin 源文件 |
+| CI 症状 | AAPT `resource ... not found` | Kotlin `Unresolved reference` |
+| 本机能否构建 | ✅ 能（文件在磁盘） | ✅ 能|
+| 共同根因 | **`.gitignore` 通配符误伤源码** | 同左 |
+
+**两条必须记住的规则**
+
+1. **`.gitignore` 的目录规则要锚定根目录**。
+   裸写 `data/` 会匹配**任意层级**的 `data` 目录；
+   必须写 `/data/`（前导斜杠 = 只匹配仓库根那一层）。
+
+   ```gitignore
+   /data/          #✅ 只忽略根目录的 data/
+   data/           #❌ 连 android-native/.../erpnative/data/ 一起忽略
+   ```
+
+2. **`.gitignore` 不支持行尾注释**（和 `.gitattributes` 是同一个坑）。
+   写 `/uploads/    # 意见反馈附件` 时，git 会把 `# 意见反馈附件`
+   一起当成路径去匹配，**整条规则静默失效**。注释必须独占一行。
+
+**为什么本机一直测不出来**
+
+`assembleRelease` 只看磁盘，不看 git 仓库。文件在磁盘上就编译通过。
+所以本机自检脚本一开始只查 `git ls-files --others --ignored`，
+在文件已被 `git add` 过之后**会误判通过**。
+
+最终 `android-native/scripts/check-res.mjs` 做了六项双向验证的检查：
+
+1. XML 里的 `@drawable/` `@mipmap/` 引用在 `res/` 下真实存在
+2. 自适应图标的背景/前景/单色三层齐全
+3. `res/` 下的资源没被 `.gitignore` 排除
+4. `res/` 下的资源都在 `git ls-files` 索引里
+5. `.gitignore` 没有行尾注释
+6. **全仓库源码双向对账**：磁盘上有、仓库里没有（→ 别人克隆后缺文件），
+   以及仓库里有、磁盘上没有（→ 提交记录与工作区不一致）
+
+**通用教训**：交付一个开源仓库之前，除了「本地能跑」，还必须做一次
+**「从干净克隆构建」**（`git clone` 到新目录再构建）。
+`.gitignore` 的所有通配规则，只有这样才能验出来。
