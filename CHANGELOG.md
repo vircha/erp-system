@@ -319,7 +319,7 @@ const isRet = (o.status === 'returned') || Number(o.total || 0) < 0;
 ## 2026-10-14 — 商品条码归位 + 牛角包参数统一
 
 - `products.spec` 里的条码归位到 `products.barcode`（104/107 条）
-- 新希望牛角包 7 个商品参数统一：pack 16 / cost 1.6 / price 2.5
+- 某品牌牛角包 7 个商品参数统一（pack/成本/售价见下表，已脱敏）
 
 ## 2026-10-09 — 开单模板加合计（件数）列与列宽优化
 
