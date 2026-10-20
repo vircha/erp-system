@@ -1,5 +1,6 @@
 package com.heping.erpnative.ui.main
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -24,6 +25,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
@@ -333,25 +335,72 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (SessionStore.isCustomer) {
-                // 客户：显示本店名；负责多家门店时给个切换入口，只有一家就直接锁死
+                // 🔴🔴 2026-10-20 经理（网页版）两次反馈「我都不知道原来门店可以选择的」，手机版同步。
+                //   原来只给一个 36dp 的「切换门店」小按钮，跟旁边的文字一个视觉层级，
+                //   看不出这里能点。改成整块可点的卡片：标题 + 店名大字 + 右侧绿色「切换 ›」。
+                //   多门店才可点；只有一家门店就显示「已锁定」，不给假入口。
                 val canSwitch = SessionStore.customerIds.size > 1
-                Row(
-                    Modifier.fillMaxWidth().height(42.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
                 ) {
-                    Text(
-                        vm.selectedCustomer?.name ?: "我的门店",
-                        maxLines = 1, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f).padding(start = 10.dp)
-                    )
-                    if (canSwitch) {
-                        OutlinedButton(
-                            onClick = { showStorePicker = true },
-                            modifier = Modifier.height(36.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp)
-                        ) { Text("切换门店", fontSize = 13.sp) }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f))
+                            .border(
+                                if (canSwitch) 1.5.dp else 1.dp,
+                                if (canSwitch) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                RoundedCornerShape(12.dp)
+                            )
+                            .then(if (canSwitch) Modifier.clickable { showStorePicker = true } else Modifier)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "当前下单门店",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                vm.selectedCustomer?.name ?: "我的门店",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (canSwitch) {
+                            Row(
+                                Modifier
+                                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 11.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("切换", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onPrimary)
+                                Text("›", fontSize = 15.sp, color = MaterialTheme.colorScheme.onPrimary)
+                            }
+                        } else {
+                            Text(
+                                "已锁定",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(7.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(7.dp))
+                                    .padding(horizontal = 8.dp, vertical = 5.dp)
+                            )
+                        }
                     }
+                    Text(
+                        if (canSwitch) "价格按当前门店的历史送货价带出 · 点上方卡片可换门店"
+                        else "价格按本店历史送货价带出",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                    )
                 }
             } else {
             Button(
@@ -406,8 +455,22 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
         }
 
         // 商品搜索（本地模糊过滤）+ 可折叠列表：默认不占地方，一输入就展开
-        val shownProducts = remember(vm.products, productQuery) {
-            Fuzzy.filter(vm.products, productQuery) { listOf(it.name, it.barcode, it.spec, it.unit) }
+        // 🔴 2026-10-20 历史优先：不搜词时，把该店**有历史成交价**的商品排前面。
+        //   依据是 priceMap（= customer_prices，那张表就是这个门店的「记忆」）。
+        //   手机版本来就是全量列表（点「浏览」展开），不存在网页版「默认只显示 8 项」的问题，
+        //   所以这里只需要重排 + 给一句提示，不需要「展开全部」按钮。
+        val hasHistory = vm.priceMap.isNotEmpty()
+        val shownProducts = remember(vm.products, productQuery, hasHistory) {
+            val hit = Fuzzy.filter(vm.products, productQuery) { listOf(it.name, it.barcode, it.spec, it.unit) }
+            if (productQuery.isNotBlank() || !hasHistory) {
+                hit
+            } else {
+                val (withPrice, withoutPrice) = hit.partition { vm.hasStorePrice(it.id) }
+                withPrice + withoutPrice
+            }
+        }
+        val histCount = remember(vm.products, hasHistory) {
+            if (!hasHistory) 0 else vm.products.count { vm.hasStorePrice(it.id) }
         }
         val listOpen = productQuery.isNotBlank() || browseProducts
         Row(
@@ -447,6 +510,16 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             }
         }
         if (listOpen) {
+            // 历史优先的提示只在「没搜词 + 真的有历史价」时出现 —— 否则是句废话
+            if (productQuery.isBlank() && histCount > 0) {
+                Text(
+                    "常买的前 ${minOf(histCount, 12)} 项已按本店历史成交价排在最前（该店有历史价 $histCount 项 / 全部 ${vm.products.size} 项）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 16.dp, top = 2.dp),
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+            }
             Text(
                 if (productQuery.isNotBlank()) "模糊匹配 ${shownProducts.size} 项，按相关度排序"
                 else "全部商品 ${shownProducts.size} 项",
@@ -532,7 +605,14 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                         Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(Modifier.weight(1f).clickable { detailIdx = idx }) {
+                        // 🔴 2026-10-20 客户账号：不点开明细弹窗（那里面能改单价）。
+                        //    数量的加减在行尾有独立按钮，不受影响 —— 客户该能改数量。
+                        //    服务端本来就强制按 customer_prices 取价，这里只是不给「改了没反应」的假入口。
+                        Column(
+                            Modifier.weight(1f)
+                                .clickable(enabled = !SessionStore.isCustomer) { detailIdx = idx }
+                        ) {
+
                             Text(
                                 line.product.name,
                                 style = MaterialTheme.typography.bodyMedium,
@@ -563,11 +643,13 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                             }
                         }
                         // 单品折扣：有的商品有、有的没有，逐行独立
+                        // 🔴 2026-10-20 客户账号：只读展示（服务端已强制取价，见 ItemDiscountBox 注释）
                         ItemDiscountBox(
                             key = line.product.id,
                             value = line.discount,
                             onChange = { d -> vm.setItemDiscount(idx, d) },
-                            readBack = { vm.cart.getOrNull(idx)?.discount }
+                            readBack = { vm.cart.getOrNull(idx)?.discount },
+                            readOnly = SessionStore.isCustomer
                         )
                         IconButton(
                             onClick = {
@@ -644,6 +726,17 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             }
         }
 
+        // 🔴 2026-10-20 客户账号：明说折扣/单价是只读的，省得客户去点灰框。
+        //    数量照常可改（加减按钮和数字框都在）。
+        if (SessionStore.isCustomer) {
+            Text(
+                "单价与折扣按本店历史价带出，不能修改；数量可改",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+            )
+        }
+
         // 底部固定条：折扣 + 合计/应收 + 提交（始终可见，不用滑到底）
         Surface(tonalElevation = 2.dp, shadowElevation = 8.dp) {
             Row(
@@ -653,6 +746,22 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("折扣", style = MaterialTheme.typography.labelSmall)
                     Spacer(Modifier.height(2.dp))
+                    // 🔴 2026-10-20 客户账号：整单折扣只读展示。
+                    //   服务端对客户强制 discount=1，前端这里不给输入框（避免「改了金额不变」的困惑）。
+                    if (SessionStore.isCustomer) {
+                        Box(
+                            Modifier.width(58.dp).height(32.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f), RoundedCornerShape(8.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                vm.discountInput,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
                     Box(
                         Modifier.width(58.dp).height(32.dp)
                             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp)),
@@ -671,6 +780,7 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             modifier = Modifier.fillMaxWidth()
                         )
+                    }
                     }
                 }
                 Spacer(Modifier.width(12.dp))
@@ -858,22 +968,45 @@ private fun StorePickerDialog(
                 Spacer(Modifier.height(8.dp))
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
                     items(stores) { c ->
+                        // 🔴 2026-10-20 卡片化：原来靠店名前拼一个 "✅ " emoji 标当前项。
+                        //    emoji 字形在各系统/各字号下都不一样，对不齐也不够醒目 →
+                        //    改成主色描边 + 右上角「当前」文字 pill（跟网页版 .store-switch-item 一致）。
+                        val on = c.id == currentId
                         Row(
                             Modifier.fillMaxWidth()
-                                .clickable { if (c.id != currentId) onPick(c) }
-                                .padding(10.dp)
-                        ) {
-                            Column {
-                                Text(
-                                    (if (c.id == currentId) "✅ " else "") + c.name,
-                                    style = MaterialTheme.typography.bodyLarge
+                                .padding(vertical = 3.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (on) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                                            else MaterialTheme.colorScheme.surface)
+                                .border(
+                                    if (on) 1.5.dp else 1.dp,
+                                    if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                    RoundedCornerShape(10.dp)
                                 )
+                                .clickable { if (!on) onPick(c) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(c.name, style = MaterialTheme.typography.bodyLarge)
                                 if (!c.phone.isNullOrEmpty()) {
                                     Text(c.phone!!, style = MaterialTheme.typography.labelSmall)
                                 }
                             }
+                            if (on) {
+                                Text(
+                                    "当前",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier
+                                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(20.dp))
+                                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            } else {
+                                Text("选择 ›", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
-                        HorizontalDivider()
                     }
                 }
             }
@@ -935,14 +1068,43 @@ private fun fmtDisc(d: Double): String =
  *
  * 输入体验与数量框保持一致：允许留空、允许 "0." 这种中间态，
  * 失焦才回写规整值 —— 不然删末尾字符会被立刻回写成原值，删不动。
+ *
+ * 🔴 readOnly=true（2026-10-20 客户账号）：改成纯展示的静态 Text。
+ *   服务端 `_forceStorePrice` 已经强制按 customer_prices 取价，框里改什么都不影响金额 ——
+ *   但让客户能改却发现「金额没变」会以为系统坏了，所以直接不给输入框。
+ *   用灰底 + 虚线感（低对比边框）表达「看得到、碰不到」。
  */
 @Composable
 private fun ItemDiscountBox(
     key: Any?,
     value: Double,
     onChange: (Double) -> Unit,
-    readBack: () -> Double?
+    readBack: () -> Double?,
+    readOnly: Boolean = false
 ) {
+    val hasDiscount = value != 1.0
+    if (readOnly) {
+        Box(
+            Modifier
+                .width(48.dp)
+                .height(34.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    RoundedCornerShape(8.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                fmtDisc(value),
+                fontSize = 14.sp,
+                color = if (hasDiscount) MaterialTheme.colorScheme.tertiary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        return
+    }
     var text by remember(key) { mutableStateOf(fmtDisc(value)) }
     var focused by remember(key) { mutableStateOf(false) }
     // 未聚焦时跟随外部变化（批量设折扣 / 明细弹窗改完）
@@ -952,7 +1114,6 @@ private fun ItemDiscountBox(
             if (text.toDoubleOrNull() != cur) text = fmtDisc(cur)
         }
     }
-    val hasDiscount = value != 1.0
     Box(
         Modifier
             .width(48.dp)

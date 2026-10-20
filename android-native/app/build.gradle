@@ -19,8 +19,8 @@ android {
         //   ⚠️ 若你的服务器还没配好 HTTPS 证书，临时改回 http 并放开明文流量，
         //      但务必尽快上证书。
         // 👉 部署时改这里，或在根目录放local.properties 里用 apiBase 覆盖（见 gradle.properties 说明）。
-        versionCode 54
-        versionName '5.6.6'
+        versionCode 55
+        versionName '5.6.7'
         vectorDrawables { useSupportLibrary true }
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——

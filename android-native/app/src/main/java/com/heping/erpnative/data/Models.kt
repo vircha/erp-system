@@ -143,10 +143,23 @@ data class Order(
     val remark: String? = null,
     val created_at: String? = null,
     @SerializedName("return_of") val returnOf: Int? = null,
+    // 🔴 2026-10-20 客户自助下单标识：服务端 orders 表新加了 placed_by / placed_by_role /
+    //    placed_by_name 三列，GET /api/orders 用的是 `SELECT *`，所以字段已经在返回里，
+    //    这里加两行就能接上，**不需要改服务端**。
+    //    判据用 placedByRole == "customer"（强信号），❌ 不用「有备注」之类的弱信号。
+    @SerializedName("placed_by_role") val placedByRole: String? = null,
+    @SerializedName("placed_by_name") val placedByName: String? = null,
     // 🔴 已被收款核销的金额（2026-10-17 应收应付上线）。
     //    欠款 = payable − settled；结清状态一律由金额推导，**不看 status**。
     val settled: Double? = null
 ) {
+    /**
+     * 是不是客户用下单账号自助提交的单（而不是业务员代开）。
+     * 老订单这三列是 NULL → false → 不显示标识。
+     * 🔴 绝不能把 NULL 回落成 "staff" —— 那等于把全部历史单标成商家单。
+     */
+    fun isCustomerSelfOrder(): Boolean = (placedByRole ?: "") == "customer"
+
     /** 未结金额：退货单 payable 为负，会自动抵减欠款 */
     fun left(): Double = (payable.takeIf { it != 0.0 } ?: total) - (settled ?: 0.0)
 

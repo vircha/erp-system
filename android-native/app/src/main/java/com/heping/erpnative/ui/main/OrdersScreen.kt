@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -295,16 +296,30 @@ fun OrdersScreen(
                         modifier = Modifier.padding(vertical = 4.dp),
                         onClick = { vm.loadDetail(o.id) }
                     ) {
+                        // 🔴 2026-10-20 客户自助单：紫色左侧竖条 + badge，
+                        //    跟商家代开的单一眼分开（判据见 CustOrderTag.kt）
+                        val fromCust = o.isCustomerSelfOrder()
                         Card(
-                            Modifier.fillMaxWidth(),
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp)
+                            Modifier.fillMaxWidth().then(custCardBar(fromCust)),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                            colors = if (fromCust)
+                                androidx.compose.material3.CardDefaults.cardColors(
+                                    containerColor = Color(0xFF8A4FD3).copy(alpha = 0.05f)
+                                )
+                            else androidx.compose.material3.CardDefaults.cardColors()
                         ) {
                             Row(
                                 Modifier.fillMaxWidth().padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    HighlightText(o.orderNo, keyword, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        HighlightText(o.orderNo, keyword, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                                        if (fromCust) {
+                                            Spacer(Modifier.width(2.dp))
+                                            CustOrderBadge(o.placedByName)
+                                        }
+                                    }
                                     HighlightText(
                                         "${o.customerName ?: "散客"}  ·  ${shortDate(o.orderDate)}",
                                         keyword,
@@ -431,10 +446,21 @@ fun OrderDetailDialog(
     }
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text(o.orderNo) },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(o.orderNo)
+                // 🔴 详情页也标出来 —— 列表扫过去忘了，再点开必须还能确认这张单的来源
+                if (o.isCustomerSelfOrder()) {
+                    Spacer(Modifier.width(4.dp))
+                    CustOrderBadge(o.placedByName)
+                }
+            }
+        },
         text = {
             Column {
                 Text("客户：${o.customerName ?: "散客"}")
+                if (o.isCustomerSelfOrder() && !o.placedByName.isNullOrBlank())
+                    Text("下单账号：${o.placedByName}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("日期：${o.orderDate ?: ""}")
                 if ((o.status ?: "") == "returned") Text("状态：已退货", color = MaterialTheme.colorScheme.error)
                 // 🔴 结算信息（应收 / 已收 / 未结）——只看 settled，绝不回写订单金额

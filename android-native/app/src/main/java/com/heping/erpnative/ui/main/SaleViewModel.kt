@@ -176,9 +176,20 @@ class SaleViewModel : ViewModel() {
         priceMap = emptyMap(); itemDiscountMap = emptyMap()
     }
 
-    private var priceMap: Map<Int, Double> = emptyMap()
+    /**
+     * 门店 × 商品的**历史送货价**记忆（= customer_prices 那张表）。
+     * 🔴 2026-10-20 从 private 改成公开的 `mutableStateOf`：商品列表要按它做「历史优先」排序，
+     *   而 Compose 只有读到 observable state 才会重绘 —— 挂在普通 var 上排序永远不更新。
+     */
+    var priceMap by mutableStateOf<Map<Int, Double>>(emptyMap())
     /** 门店 × 商品的单品折扣记忆（选客户时拉回来，加购自动套用） */
     private var itemDiscountMap: Map<Int, Double> = emptyMap()
+
+    /**
+     * 2026-10-20 商品列表「历史优先」排序要用。
+     * 判据用「有值且 > 0」—— customer_prices 里 0/NULL 是脏数据，不能算「有历史价」。
+     */
+    fun hasStorePrice(productId: Int): Boolean = (priceMap[productId] ?: 0.0) > 0.0
 
     fun loadCustomers(q: String? = null) {
         viewModelScope.launch {
@@ -360,7 +371,12 @@ class SaleViewModel : ViewModel() {
         return try {
             submitting = true
             error = null
-            val d = discountInput.toDoubleOrNull()?.coerceIn(0.1, 1.0) ?: 1.0
+            // 🔴 2026-10-20 客户账号：整单折扣强制 1（服务端 _forceStorePrice 也会再强制一次，
+            //    这里只是不把「折扣由商家定」的东西发出去）。UI 已改成只读，正常走不到非 1 的分支，
+            //    但仍显式兜住 —— 免得以后有人把只读去掉就静默把折扣传出去了。
+            val d = if (SessionStore.isCustomer) 1.0
+                    else (discountInput.toDoubleOrNull()?.coerceIn(0.1, 1.0) ?: 1.0)
+
             val req = CreateOrderRequest(
                 customerId = cust.id,
                 // price 传折前单价 + 带上该行 discount，服务端会算出成交价 = price × discount；
