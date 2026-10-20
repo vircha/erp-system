@@ -145,12 +145,28 @@ class SaleViewModel : ViewModel() {
         } catch (e: Exception) { error = e.userMessage(); false }
     }
 
-    /** 原单明细 → 购物车行。商品被删也要保住这一行（用明细快照临时造一个 Product），
-     *  否则编辑一次就会静默吞掉门店买过的商品。 */
+    /** 原单明细 → 购物车行。
+     *
+     * 🔴🔴 2026-10-20 经理需求「商品信息变动不影响历史已开出的订单，该显示原来的信息就原来的信息」。
+     *   原实现是 `products.firstOrNull { it.id == product_id }` **优先用当前商品表**，
+     *   商品被删才回退到明细快照 —— 语义正好反了：商品表改了名/规格/条码后，
+     *   编辑一张老单（只想改数量）屏幕上显示的就是**新名**，保存后服务端按快照写回，
+     *   前后不一致还会让人以为数据被改了。
+     *   ✅ 正解：一律用**明细快照**造 Product。编辑态显示的就是开单当时的信息。
+     *   （服务端 PUT 也已同步改成沿用原单快照，两端口径一致。）
+     *
+     *   商品被删也要保住这一行，否则编辑一次就会静默吞掉门店买过的商品。 */
     private fun OrderItem.toEditLine(): CartLine {
-        val p = products.firstOrNull { it.id == product_id }
-            ?: Product(id = product_id, name = productName, barcode = barcode, spec = spec,
+        val snapName = productName
+        val p = if (snapName.isNotBlank()) {
+            Product(id = product_id, name = snapName, barcode = barcode, spec = spec,
                 unit = unit ?: "个", price = price)
+        } else {
+            // 极端兜底：明细快照名为空（理论上不该发生）才回退当前商品表
+            products.firstOrNull { it.id == product_id }
+                ?: Product(id = product_id, name = "", barcode = barcode, spec = spec,
+                    unit = unit ?: "个", price = price)
+        }
         val od = (discount ?: 1.0).let { if (it > 0) it else 1.0 }
         val op = origPrice ?: 0.0
         // 有单品折扣的行：price 是折后价，要用折前单价回填，否则再存一次就折两次
