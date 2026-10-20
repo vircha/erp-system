@@ -1,0 +1,15 @@
+[Unit]
+Description=ERP full backup to object storage (backend + frontend + sqlite snapshot + uploads)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/erp_backup_r2.sh
+TimeoutStartSec=3600
+# 备份是后台活，别跟业务抢 IO / CPU
+Nice=10
+IOSchedulingClass=idle
+# 🔴 rclone 的 S3 provider 配置在 $HOME/.config/rclone/rclone.conf，
+#    systemd 起的 oneshot 若拿不到 HOME 会报「config not found」，这里显式钉死。
+Environment=HOME=/root
