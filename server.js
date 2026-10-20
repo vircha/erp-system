@@ -373,6 +373,32 @@ function newSession(account) {
   SESSIONS.set(tok, { account_id: account.id, book_id: account.book_id, ts: Date.now() });
   return tok;
 }
+/**
+ * 取一组 product_id 在给定区间内**最新一条明细**的快照（name/spec/unit/barcode/cost）。
+ *
+ * 🔴🔴 2026-10-20 经理需求「商品信息变动不影响历史已开出的订单」。
+ *   报表按 product_id 聚合时，显示名/规格/单位**必须统一取一个值**：
+ *   原来 SQL 里 `GROUP BY oi.product_id, oi.product_name`，商品改名后同一个
+ *   product_id 被**拆成两组**，销量/金额被割裂（同一商品在报表里出现两行，各算一半）。
+ *   ✅ 正解：SQL 只按 product_id 分组（数字永远合并），
+ *      显示用的名称/规格/单位单独取区间内**最新**明细的快照。
+ */
+function latestItemSnapshots(bookId, pids, whereSql, args) {
+  const map = new Map();
+  if (!Array.isArray(pids) || !pids.length) return map;
+  const uniq = [...new Set(pids.filter(v => v != null))];
+  if (!uniq.length) return map;
+  const ph = uniq.map(() => '?').join(',');
+  let sql = `SELECT oi.product_id, oi.product_name, oi.spec, oi.unit, oi.barcode, oi.cost
+             FROM order_items oi JOIN orders o ON o.id=oi.order_id
+             WHERE oi.book_id=? AND oi.product_id IN (${ph}) ${whereSql || ''}
+             ORDER BY oi.id ASC`;
+  const rows = db.prepare(sql).all(bookId, ...uniq, ...(args || []));
+  // 升序遍历 → 后写入的覆盖前面的 → 最终留下**最新**那条
+  for (const r of rows) map.set(r.product_id, r);
+  return map;
+}
+
 function ctxOf(req) {
   const h = req.headers['authorization'] || '';
   const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
@@ -1571,14 +1597,20 @@ async function handleApi(req, res, u) {
     }
     const items = db.prepare('SELECT * FROM order_items WHERE order_id=?').all(m[1]);
     // 2026-10-15：老单是 barcode 加列之前开的，明细里没条码快照。
-    // 用当前商品表回填（只补空的、只影响返回值不改历史行），保证老订单也能打出条码。
+    // 用当前商品表回填，保证老订单也能打出条码。
+    // 🔴🔴 2026-10-20：原来**只改返回值不写库** → 商品表后来改了条码，这张老单的条码也跟着变，
+    //   违反「商品信息变动不影响历史已开出的订单」。
+    //   ✅ 回填时**写回 order_items 冻结**：取到什么就是什么，之后商品表再改也不动这张老单。
     const missing = items.filter(it => it.product_id && !String(it.barcode || '').trim());
     if (missing.length) {
-      const stmt = db.prepare('SELECT barcode FROM products WHERE id=? AND book_id=?');
-      for (const it of missing) {
-        const p = stmt.get(it.product_id, bookId);
-        if (p && String(p.barcode || '').trim()) it.barcode = p.barcode;
-      }
+      try {
+        const stmt = db.prepare('SELECT barcode FROM products WHERE id=? AND book_id=?');
+        const upd = db.prepare('UPDATE order_items SET barcode=? WHERE id=?');
+        for (const it of missing) {
+          const p = stmt.get(it.product_id, bookId);
+          if (p && String(p.barcode || '').trim()) { it.barcode = p.barcode; upd.run(p.barcode, it.id); }
+        }
+      } catch (e) { console.error('barcode freeze:', e.message); }
     }
     return sendJSON(res, 200, { order: o, items });
   }
@@ -1602,20 +1634,37 @@ async function handleApi(req, res, u) {
     // 客户端一律传正数量，服务端按 sign 翻负并沿用正确的库存方向。
     const isReturnEdit = o.status === 'returned';
     const sign = isReturnEdit ? -1 : 1;
+    // 🔴🔴 2026-10-20 经理需求「商品信息变动不影响历史已开出的订单，该显示原来的信息就原来的信息」。
+    //   场景：3 个月前开的单，商品名当时是「光明180ml轻巧包原味」，之后商品表改名成
+    //   「光明180轻巧包原味」；今天编辑这张单（只想改数量）→ 旧实现 DELETE 明细后用
+    //   **当前 products 表**重建 INSERT → 历史单的名字/规格/条码/成本全被改掉了。
+    //   ✅ 正解：product_id 在**原单**里出现过 → 沿用原单快照；
+    //      只有**新增**的行才取当前商品表。商品已从商品表删除也要保住这一行
+    //      （否则编辑一次就静默吞掉门店买过的商品）。
+    const prevRows = db.prepare('SELECT product_id, product_name, spec, barcode, unit, cost, price, orig_price, discount FROM order_items WHERE order_id=?').all(m[1]);
+    const prevByPid = new Map();
+    for (const pi of prevRows) if (pi.product_id != null && !prevByPid.has(pi.product_id)) prevByPid.set(pi.product_id, pi);
     for (const it of b.items) {
-      const prod = db.prepare('SELECT * FROM products WHERE id=? AND book_id=?').get(it.product_id, bookId);
-      if (!prod) return sendJSON(res, 400, { error: '商品不存在 id=' + it.product_id });
+      const pid = Number(it.product_id);
+      const prev = prevByPid.get(pid) || null;
+      const prod = db.prepare('SELECT * FROM products WHERE id=? AND book_id=?').get(pid, bookId);
+      // 商品表里已经没有它了，但原单有 → 允许改（按原单快照走）
+      if (!prod && !prev) return sendJSON(res, 400, { error: '商品不存在 id=' + it.product_id });
       const qty = Math.abs(Number(it.qty)); if (!(qty > 0)) return sendJSON(res, 400, { error: '数量无效' });
+      // 单价兜底：优先报文 → 其次原单快照（折前价优先）→ 最后当前商品表
+      const prevBase = prev ? (Number(prev.orig_price) > 0 ? Number(prev.orig_price) : Number(prev.price)) : 0;
+      const fallbackPrice = prevBase > 0 ? prevBase : (prod ? Number(prod.price) || 0 : 0);
       let c;
       if (it.discount != null) {
-        c = lineCalc(it.price !== undefined ? it.price : prod.price, qty, it.discount);
+        c = lineCalc(it.price !== undefined ? it.price : fallbackPrice, qty, it.discount);
       } else {
-        const p0 = Number(it.price !== undefined ? it.price : prod.price) || 0;
+        const p0 = Number(it.price !== undefined ? it.price : fallbackPrice) || 0;
         c = { price: p0, orig_price: p0, discount: 1, subtotal: +(p0 * qty).toFixed(2) };
       }
       const subtotal = c.subtotal; total += subtotal;
-      lines.push({ prod, qty, price: c.price, cost: Number(prod.cost) || 0, subtotal,
-                   discount: c.discount, orig_price: c.orig_price });
+      lines.push({ prod, prev, pid, product_id: pid, qty, price: c.price,
+                   cost: prev ? (Number(prev.cost) || 0) : (Number(prod && prod.cost) || 0),
+                   subtotal, discount: c.discount, orig_price: c.orig_price });
     }
     total = +total.toFixed(2);
     const discount = Math.min(1, Math.max(0.1, Number(b.discount) || 1));
@@ -1634,8 +1683,18 @@ async function handleApi(req, res, u) {
       for (const L of lines) {
         const sq = L.qty * sign;
         const ssub = +(L.subtotal * sign).toFixed(2);
-        db.prepare('INSERT INTO order_items(book_id,order_id,product_id,product_name,spec,barcode,unit,qty,price,cost,subtotal,discount,orig_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(bookId, m[1], L.prod.id, L.prod.name, L.prod.spec, L.prod.barcode || '', L.prod.unit, sq, L.price, L.cost, ssub, L.discount, L.orig_price);
-        db.prepare("UPDATE inventory SET qty=qty+?, updated_at=datetime('now','localtime') WHERE product_id=?").run(-sq, L.prod.id);
+        // 🔴 快照取值：原单有 → 一律沿用原单（name/spec/unit/cost）；
+        //   只有**新增**的行才取当前商品表。barcode 例外：原单为空时取当前商品条码
+        //   （老单开单时还没条码列，回填一次才能打条码；取到就落库冻结，见 GET 那段）。
+        const pv = L.prev;
+        const sName  = pv ? (pv.product_name || '') : (L.prod.name || '');
+        const sSpec  = pv ? (pv.spec || '') : (L.prod.spec || '');
+        const sUnit  = pv ? (pv.unit || '') : (L.prod.unit || '');
+        const sBc    = pv ? (String(pv.barcode || '').trim() ? (pv.barcode || '') : (L.prod.barcode || ''))
+                          : (L.prod.barcode || '');
+        const pidUse = L.pid != null ? L.pid : L.prod.id;
+        db.prepare('INSERT INTO order_items(book_id,order_id,product_id,product_name,spec,barcode,unit,qty,price,cost,subtotal,discount,orig_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(bookId, m[1], pidUse, sName, sSpec, sBc, sUnit, sq, L.price, L.cost, ssub, L.discount, L.orig_price);
+        db.prepare("UPDATE inventory SET qty=qty+?, updated_at=datetime('now','localtime') WHERE product_id=?").run(-sq, pidUse);
       }
       // status 锁死为 returned，编辑退货单不能把它改成 paid
       db.prepare('UPDATE orders SET customer_id=?, customer_name=?, total=?, payable=?, discount=?, order_date=?, status=? WHERE id=?').run(cust.id, cust.name, totalSigned, payableSigned, discount, b.order_date || o.order_date || null, isReturnEdit ? 'returned' : (b.status || o.status || 'paid'), m[1]);
@@ -2154,14 +2213,21 @@ async function handleApi(req, res, u) {
     if (from) { w.push('date(COALESCE(o.order_date,o.created_at))>=?'); a.push(from); }
     if (to) { w.push('date(COALESCE(o.order_date,o.created_at))<=?'); a.push(to); }
     const wh = w.length ? ' AND ' + w.join(' AND ') : '';
+    // 🔴🔴 GROUP BY 只按 product_id：商品名/规格/单位会变（改名、改规格），
+    //   裸列 product_name/unit/spec 取的是**任意一行**，改名后显示名会随机跳。
     const rows = db.prepare(`
-      SELECT oi.product_id, oi.product_name, oi.unit, oi.spec,
+      SELECT oi.product_id,
              SUM(oi.qty) qty, SUM(oi.subtotal) sales,
              SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty) profit
       FROM order_items oi JOIN orders o ON o.id=oi.order_id
       WHERE o.book_id=? ${wh}
       GROUP BY oi.product_id ORDER BY sales DESC LIMIT 200`).all(...a);
-    return sendJSON(res, 200, rows.map(r => ({ ...r, qty: r.qty || 0, sales: +(r.sales || 0).toFixed(2), profit: +(r.profit || 0).toFixed(2) })));
+    const snap = latestItemSnapshots(bookId, rows.map(r => r.product_id), wh, a.slice(1));
+    return sendJSON(res, 200, rows.map(r => {
+      const sn = snap.get(r.product_id) || {};
+      return { ...r, product_name: sn.product_name || '', spec: sn.spec || '', unit: sn.unit || '',
+               qty: r.qty || 0, sales: +(r.sales || 0).toFixed(2), profit: +(r.profit || 0).toFixed(2) };
+    }));
   }
 
   // GET /api/report/stores?from&to
@@ -2237,16 +2303,28 @@ async function handleApi(req, res, u) {
              COUNT(DISTINCT o.id) as orders
       FROM orders o JOIN order_items oi ON oi.order_id=o.id
       WHERE o.book_id=? AND ${dExpr} BETWEEN ? AND ?`).get(bookId, from, to);
+    // 🔴🔴 GROUP BY 只按 product_id（原来还带 oi.product_name → 商品改名后被拆组、销量割裂）
     const products = db.prepare(`
-      SELECT oi.product_id as pid, oi.product_name as name,
+      SELECT oi.product_id as pid,
              COALESCE(SUM(oi.qty),0) as qty,
              COALESCE(SUM(oi.qty*oi.price),0) as sales,
              COALESCE(SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty),0) as profit
       FROM orders o JOIN order_items oi ON oi.order_id=o.id
       WHERE o.book_id=? AND ${dExpr} BETWEEN ? AND ?
-      GROUP BY oi.product_id, oi.product_name
+      GROUP BY oi.product_id
       HAVING SUM(oi.qty) <> 0 OR SUM(oi.qty*oi.price) <> 0
       ORDER BY profit DESC`).all(bookId, from, to);
+    {
+      const wh2 = ' AND ' + dExpr + ' BETWEEN ? AND ?';
+      const sn = latestItemSnapshots(bookId, products.map(p => p.pid), wh2, [from, to]);
+      for (const pr of products) {
+        const s = sn.get(pr.pid) || {};
+        pr.name = s.product_name || '';
+        pr.unit = s.unit || '';
+        pr.spec = s.spec || '';
+        pr.cost = Number(s.cost) || 0;
+      }
+    }
     const sales = tot.sales || 0, profit = tot.profit || 0;
     products.forEach(pr => { pr.qty = pr.qty || 0; pr.sales = pr.sales || 0; pr.profit = pr.profit || 0; pr.margin = (pr.sales !== 0 ? pr.profit / pr.sales : 0); });
     return sendJSON(res, 200, { range, from, to, sales, profit, margin: (sales !== 0 ? profit / sales : 0), orders: tot.orders || 0, qty: tot.qty || 0, products });
@@ -2257,12 +2335,24 @@ async function handleApi(req, res, u) {
     if (!need('analysis.view')) return;
     const dExpr = "date(COALESCE(o.order_date, o.created_at))";
     const date = u.searchParams.get('date') || (new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-' + String(new Date().getDate()).padStart(2, '0'));
+    // 🔴🔴 GROUP BY 只按 customer_id + product_id：客户名/商品名/单位/成本都会变，
+    //   放进 GROUP BY 会把同一个 product_id 拆成多组，出货汇总里同一商品出现两行。
     const lines = db.prepare(`
-      SELECT o.customer_id as cid, o.customer_name as cname, oi.product_id as pid, oi.product_name as pname,
-             oi.unit as unit, oi.cost as cost, SUM(oi.qty) as qty, SUM(oi.qty*oi.price) as amount
+      SELECT o.customer_id as cid, o.customer_name as cname, oi.product_id as pid,
+             SUM(oi.qty) as qty, SUM(oi.qty*oi.price) as amount
       FROM orders o JOIN order_items oi ON oi.order_id=o.id
       WHERE o.book_id=? AND ${dExpr}=?
-      GROUP BY o.customer_id, o.customer_name, oi.product_id, oi.product_name, oi.unit, oi.cost`).all(bookId, date);
+      GROUP BY o.customer_id, oi.product_id`).all(bookId, date);
+    {
+      const wh2 = ' AND ' + dExpr + '=?';
+      const sn = latestItemSnapshots(bookId, lines.map(l => l.pid), wh2, [date]);
+      for (const l of lines) {
+        const s = sn.get(l.pid) || {};
+        l.pname = s.product_name || '';
+        l.unit = s.unit || '';
+        l.cost = Number(s.cost) || 0;
+      }
+    }
     const custMap = new Map(), prodMap = new Map();
     for (const l of lines) {
       if (l.cid != null && !custMap.has(l.cid)) custMap.set(l.cid, { id: l.cid, name: l.cname });
@@ -2285,12 +2375,24 @@ async function handleApi(req, res, u) {
     if (!need('analysis.view')) return;
     const dExpr = "date(COALESCE(o.order_date, o.created_at))";
     const date = u.searchParams.get('date') || (new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-' + String(new Date().getDate()).padStart(2, '0'));
+    // 🔴🔴 GROUP BY 只按 customer_id + product_id：客户名/商品名/单位/成本都会变，
+    //   放进 GROUP BY 会把同一个 product_id 拆成多组，出货汇总里同一商品出现两行。
     const lines = db.prepare(`
-      SELECT o.customer_id as cid, o.customer_name as cname, oi.product_id as pid, oi.product_name as pname,
-             oi.unit as unit, oi.cost as cost, SUM(oi.qty) as qty
+      SELECT o.customer_id as cid, o.customer_name as cname, oi.product_id as pid,
+             SUM(oi.qty) as qty
       FROM orders o JOIN order_items oi ON oi.order_id=o.id
       WHERE o.book_id=? AND ${dExpr}=?
-      GROUP BY o.customer_id, o.customer_name, oi.product_id, oi.product_name, oi.unit, oi.cost`).all(bookId, date);
+      GROUP BY o.customer_id, oi.product_id`).all(bookId, date);
+    {
+      const wh2 = ' AND ' + dExpr + '=?';
+      const sn = latestItemSnapshots(bookId, lines.map(l => l.pid), wh2, [date]);
+      for (const l of lines) {
+        const s = sn.get(l.pid) || {};
+        l.pname = s.product_name || '';
+        l.unit = s.unit || '';
+        l.cost = Number(s.cost) || 0;
+      }
+    }
     const custMap = new Map(), prodMap = new Map();
     for (const l of lines) {
       if (l.cid != null && !custMap.has(l.cid)) custMap.set(l.cid, { id: l.cid, name: l.cname });
