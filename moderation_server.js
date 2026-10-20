@@ -6,6 +6,28 @@ const GRACE_MINUTES = Number(process.env.ERP_MODERATION_GRACE || 30); // 整改�
 const SCAN_INTERVAL_MS = 60 * 1000;       // 巡检间隔 1 分钟
 const LV_ORDER = { high: 0, mid: 1, risky: 2 };
 
+// 🔴 2026-10-21 经理反馈：平台管理页「用户账号」表的角色列显示英文
+//    （customer / boss），要求全部改中文。
+//
+// 根因：这张表的数据来自 GET /api/admin/overview → MOD.adminOverview()，
+//    它把 accounts.role 原样返回（SELECT ... a.role），没有附带 roleLabel；
+//    前端 `<td>${esc(a.roleLabel || a.role)}</td>` 于是回落到英文原值。
+//    （另一张表 /api/accounts 是好的 —— server.js 里每个账号都拼了 roleLabel。）
+//
+// 🔴 为什么在这里自己定义一份 ROLE_CN，而不是从 server.js 拿 ROLES：
+//    server.js → require('./moderation_server') → init(ctx)，
+//    是单向依赖，反向 require 会成环。所以本模块内自持一份映射，
+//    🔴 server.js 的 ROLES 若新增角色，**这里必须同步补**，否则又显示英文。
+//    label 取值与 server.js 的 ROLES[].label 保持一致（老板/经理/员工/客户）。
+const ROLE_CN = {
+  boss: '老板',
+  manager: '经理',
+  staff: '员工',
+  customer: '客户',
+};
+
+// 未知角色不吞掉：回落到英文原值，便于一眼看出是没登记的新角色
+const roleLabel = (r) => ROLE_CN[r] || r;
 function init(ctx) {
   const { db, SESSIONS, pubAcc } = ctx;
 
@@ -169,6 +191,10 @@ function init(ctx) {
     const logs = db.prepare(`
       SELECT m.*, a.username FROM moderation_log m
       LEFT JOIN accounts a ON a.id=m.account_id ORDER BY m.id DESC LIMIT 100`).all();
+    // 🔴 补 roleLabel：前端 `${esc(a.roleLabel || a.role)}` 靠这个出中文，
+    //    缺了就直接显示 customer / boss（经理 2026-10-21 反馈）。
+    //    顺带补 book_total 之外的展示字段，不改 SQL，避免动到建表口径。
+    accounts.forEach(a => { a.roleLabel = roleLabel(a.role); });
     return { stats, accounts, violations, logs };
   }
 
