@@ -1,6 +1,7 @@
 // ERP 离线缓存：网络优先 + 缓存兜底
 // 只缓存静态资源（页面/CSS/JS），/api/ 等业务数据始终走网络，避免拿到旧数据。
 // 🔴 改动任何前端文件都必须 bump CACHE，否则用户浏览器继续用旧缓存。
+//v50：订单原价弹出修复（预览/打印/详情三处同步）
 //v37：修移动端布局（侧栏 220px 固定 → 手机端改顶部横向滚动条）+ 静态资源缓存策略（去 immutable）
 //v36：应收应付（管家婆式挂账+收款核销、自动分配最早优先、账期30天标红）+ 报表中心三组
 //v35：开单页「销售单 / 退货单」模式切换（管家婆式手工录品，不绑定原单，type=return）
@@ -17,7 +18,7 @@
 //v24：去掉顶栏重复的「手机版」按钮，只留侧栏单入口
 //v22：导航栏加品牌图标 + 手机版下载按钮（含二维码）
 //v21：预览浮层 z-index 提到 70，不再被订单详情弹窗压住
-const CACHE = 'erp-shell-v49';   // v49: 客户下单员多门店（门店切换器 + 门店多选授权 + 按当前门店取历史价）
+const CACHE = 'erp-shell-v50';   // v49: 客户下单员多门店（门店切换器 + 门店多选授权 + 按当前门店取历史价）
 const SHELL = ['/', '/index.html', '/css/style.css', '/css/login.css', '/css/feedback.css', '/css/print_template.css',
   '/js/app.js', '/js/receipt_preview.js', '/js/print_template.js',
   '/js/qrcode-mini.js', '/js/apk_download.js', '/js/feedback.js', '/privacy.html', '/img/logo_192.png'];

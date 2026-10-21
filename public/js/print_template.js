@@ -48,7 +48,8 @@
     { g: '商品明细', k: 'name', label: '商品名称' },
     { g: '商品明细', k: 'barcode', label: '商品条码（数字）' },
     { g: '商品明细', k: 'qty', label: '数量' },
-    { g: '商品明细', k: 'price', label: '单价' },
+    { g: '商品明细', k: 'price', label: '原价' },
+    { g: '商品明细', k: 'sale', label: '特价' },
     { g: '商品明细', k: 'amount', label: '金额' },
     { g: '商品明细', k: 'sep3', label: '明细后分隔线' },
     { g: '合计', k: 'qty_sum', label: '合计数量' },
@@ -195,15 +196,20 @@
     };
   }
 
-  /** 列宽：数字三列按固定比例分掉剩余宽度，比例与旧版一致（6:7:8） */
+  /** 列宽：数字四列按固定比例分掉剩余宽度，比例与旧版一致（6:7:7:8）
+   *  🔴 2026-10-21：数字区从 21 份放大到 28 份 —— 原「单价」7 份拆成「原价」7 + 「特价」7，
+   *     再加金额 8 份。与 receipt_preview.js（预览）的算法保持一致，
+   *     🔴 两套引擎的列宽算法必须同步，否则「预览」和「打印」会错位。
+   *     比例 6:7:7:8 与 48 列时完全一致。 */
   function cols(t) {
     const p = normalize(t).paper;
     const C = p.cols;
-    const numW = Math.max(9, Math.round(C * 21 / 48));      // 与旧 48列→21 等比
-    const q = Math.max(4, Math.round(numW * 6 / 21));
-    const pr = Math.max(5, Math.round(numW * 7 / 21));
-    const a = Math.max(5, numW - q - pr);
-    return { COLS: C, LEFT_W: C - (q + pr + a), QTY_W: q, PRICE_W: pr, AMT_W: a, NUM_W: q + pr + a, paper: p };
+    const numW = Math.max(9, Math.round(C * 28 / 48));      // 与旧 48列→21 等比
+    const q = Math.max(4, Math.round(numW * 6 / 28));
+    const pr = Math.max(5, Math.round(numW * 7 / 28));       // 原价列
+    const sale = Math.max(5, Math.round(numW * 7 / 28));     // 特价列（折后成交价）
+    const a = Math.max(5, numW - q - pr - sale);
+    return { COLS: C, LEFT_W: C - (q + pr + sale + a), QTY_W: q, PRICE_W: pr, SALE_W: sale, AMT_W: a, NUM_W: q + pr + sale + a, paper: p };
   }
 
   const on = (t, k) => !!(normalize(t).modules)[k];
@@ -244,7 +250,9 @@
     if (m.thead) {
       const r = [];
       if (m.qty !== false) r.push('数量');
-      if (m.price) r.push('单价');
+      // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
+      if (m.price) r.push('原价');
+      if (m.sale !== false) r.push('特价');
       if (m.amount !== false) r.push('金额');
       line('<span>序号 名称 / 条码</span>', '<span>' + r.join(' ') + '</span>', 'font-size:11px;color:#888');
     }
@@ -256,13 +264,17 @@
       const bc = String(it.barcode || '').trim();
       const name = ((m.idx ? (i + 1) + '. ' : '') + (it.name || ''));
       const left = (m.barcode && bc) ? '&nbsp;&nbsp;&nbsp;' + esc(bc) : '';
+      // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
+      //    原价 = it.orig_price（折前），特价 = it.price（折后成交单价）。
+      //    🔴 老单 orig_price 为 null 时兜回 p，绝不印 0.00。
+      const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
       const right = [m.qty ? esc(fmtQtyNum(q)) + esc(it.unit || '') : '',
-      m.price ? esc(fmt2(p)) : '', m.amount ? esc(fmt2(amt)) : ''].filter(Boolean).join(' ');
+      m.price ? esc(fmt2(op)) : '', m.sale !== false ? esc(fmt2(p)) : '', m.amount ? esc(fmt2(amt)) : ''].filter(Boolean).join(' ');
       const st = m.name ? '' : 'display:none';
       o.push(`<div class="line" style="font-size:11px"${st}><span>${esc(name)}</span><span>${right}</span></div>`);
       if (m.barcode && bc) {
         const r2 = [m.qty ? esc(fmtQtyNum(q)) + esc(it.unit || '') : '',
-        m.price ? esc(fmt2(p)) : '', m.amount ? esc(fmt2(amt)) : ''].filter(Boolean).join(' ');
+        m.price ? esc(fmt2(op)) : '', m.sale !== false ? esc(fmt2(p)) : '', m.amount ? esc(fmt2(amt)) : ''].filter(Boolean).join(' ');
         o.push(`<div class="line" style="font-size:10.5px;color:#888"><span>${left}</span><span>${r2}</span></div>`);
       }
     });
@@ -346,7 +358,9 @@
     if (m.thead) {
       const num = [];
       if (m.qty) num.push(H.lPadN('数量', C.QTY_W));
-      if (m.price) num.push(H.lPadN('单价', C.PRICE_W));
+      // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
+      if (m.price) num.push(H.lPadN('原价', C.PRICE_W));
+      if (m.sale !== false) num.push(H.lPadN('特价', C.SALE_W));
       if (m.amount) num.push(H.lPadN('金额', C.AMT_W));
       await put(H.rPad('序号 名称', C.LEFT_W) + num.join(''));
     }
@@ -365,7 +379,12 @@
       const bc = m.barcode ? String(it.barcode || '').trim() : '';
       const num = [];
       if (m.qty) num.push(H.lPadN(H.fmtQtyNum(q) + (it.unit || ''), C.QTY_W));
-      if (m.price) num.push(H.lPadN(H.fmt2(p), C.PRICE_W));
+      // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
+      //    原价 = it.orig_price（折前），特价 = it.price（折后成交单价）。
+      //    🔴 老单 orig_price 为 null 时兜回 p，绝不印 0.00（比没有原价更糟）。
+      const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
+      if (m.price) num.push(H.lPadN(H.fmt2(op), C.PRICE_W));
+      if (m.sale !== false) num.push(H.lPadN(H.fmt2(p), C.SALE_W));
       if (m.amount) num.push(H.lPadN(H.fmt2(amt), C.AMT_W));
       // 🔴窄纸（58mm=32列，LEFT_W 只有 18）时，「条码:」+ 13 位数字放不进左列，
       // clipW 会把末位截成「690120921289.」—— 条码错一位就扫不出来。

@@ -1934,9 +1934,16 @@ if (d.trust_full) {
       <div style="border-top:1px solid #eee;margin:10px 0"></div>
       ${d.items.map(it => {
         const od = Number(it.discount); const has = isFinite(od) && od > 0 && od < 1 - 1e-9;
+        // 🔴 2026-10-21 经理反馈「订单预览没显示原价，跟打印出来的不一样」：
+        //    这里补上「原价/成交价」两列，与小票（管家婆版式 左原价右特价）保持同口径。
+        //    🔴 老单 orig_price 为 NULL → 兜回 price 兼作原价；绝不显示 0.00。
+        const pr = Number(it.price) || 0;
+        const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : pr;
+        const opTxt = (has && Math.abs(op - pr) > 0.005)
+          ? `<s style="color:#999;margin-right:4px">${fmt(op)}</s>` : '';
         return `<div style="display:flex;justify-content:space-between;padding:3px 0">
           <span>${esc(it.product_name)} ×${it.qty}${esc(it.unit || '')}${has ? ` <span style="color:#f5a524;font-size:12px">单品${od}</span>` : ''}</span>
-          <span>${fmt(it.subtotal)}</span></div>`;
+          <span>${opTxt}<span style="margin-right:8px">${fmt(pr)}</span><b>${fmt(it.subtotal)}</b></span></div>`;
       }).join('')}
       <button class="btn-primary" id="m-print" style="margin-top:14px">🖨️打印小票</button>
       <div class="row" style="gap:8px;margin-top:8px">
@@ -4078,6 +4085,12 @@ if (d.trust_full) {
         unit: it.unit,
         price: it.price,
         qty: it.qty,
+        // 🔴 2026-10-21 经理反馈「预览没显示原价，跟打印不一样」：
+        //    折前原价（order_items.orig_price）。少了这个字段，
+        //    打印引擎（print_template.js）根本没有「原价」可印 → 只能印折后价。
+        //    🔴 2026-10-15 前的订单 orig_price 为 NULL → 兜回 price 兼作原价，
+        //    绝不传 0（比没有原价更糟）。与手机版 origOrPrice() 同口径。
+        orig_price: (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : Number(it.price),
         // 小票金额优先用服务端 subtotal（退货单本身就是负数），不要自己 qty*price 再取绝对值
         subtotal: it.subtotal
       }))
