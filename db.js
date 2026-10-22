@@ -260,6 +260,74 @@ CREATE TABLE IF NOT EXISTS settings (
   PRIMARY KEY(book_id, key)
 );
 
+
+-- ========== 采购与库存流水（2026-10-21；以销定购模式）==========
+-- 业务口径：采购量以「已有销售单数量」为准，采购入库 - 销售出库 = 库存 0（不积压）。
+-- 库存余额仍以 inventory.qty 为准，本表只是流水账（可对账、可回溯）。
+-- 🔴 三张表全部独立，不复用 orders/order_items → 采购数据不可能污染销售数据。
+CREATE TABLE IF NOT EXISTS suppliers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER DEFAULT 1,
+  name TEXT NOT NULL,
+  contact TEXT,
+  phone TEXT,
+  remark TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER DEFAULT 1,
+  purchase_no TEXT,
+  supplier_id INTEGER,
+  supplier_name TEXT,
+  total REAL DEFAULT 0,
+  payable REAL DEFAULT 0,
+  discount REAL DEFAULT 1,
+  purchase_date TEXT,
+  status TEXT DEFAULT 'received',
+  remark TEXT,
+  placed_by INTEGER,
+  placed_by_role TEXT,
+  placed_by_name TEXT,
+  received_at TEXT DEFAULT (datetime('now','localtime')),
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS purchase_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER DEFAULT 1,
+  purchase_id INTEGER,
+  product_id INTEGER,
+  product_name TEXT,
+  spec TEXT,
+  barcode TEXT,
+  unit TEXT,
+  qty REAL,
+  price REAL DEFAULT 0,
+  subtotal REAL DEFAULT 0,
+  FOREIGN KEY(purchase_id) REFERENCES purchases(id)
+);
+
+-- 库存流水：每次 inventory.qty 变动都留一条，用于「为什么库存是这个数」对账。
+-- 🔴 记得每次改 inventory 都要写一条，否则这个表等于没有。
+CREATE TABLE IF NOT EXISTS stock_moves (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER DEFAULT 1,
+  product_id INTEGER,
+  product_name TEXT,
+  move_type TEXT,          -- purchase_in / sale_out / sale_return / purchase_void / adjust
+  qty REAL,                -- 正=入库，负=出库
+  before_qty REAL,
+  after_qty REAL,
+  ref_type TEXT,           -- purchase / order
+  ref_id INTEGER,
+  ref_no TEXT,
+  remark TEXT,
+  operator TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+);
+
 -- ========== 内容合规与平台治理 ==========
 -- 违规记录：商品/客户等自由文本命中违禁词时写入一条，
 -- 先给 created_by 30 分钟自助整改（pending），超期未改由巡检任务改判并封禁。
@@ -391,6 +459,12 @@ try {
   ensureColumn('accounts', 'banned_at', 'banned_at TEXT');
   // 2026-10-18 客户下单角色：账号绑定门店，决定他能看/下哪一家的单
   ensureColumn('accounts', 'customer_id', 'customer_id INTEGER');
+  // 2026-10-19 客户自下单标识：记录这张单是谁下的（账号 id / 角色 / 显示名）。
+  // 管理界面订单列表靠 placed_by_role 区分「客户自己下的」vs「业务员代开」，一眼可分。
+  // 老订单这三列是 NULL → 前端不显示标识，不能回填成 'staff'（那等于把历史单全标成商家单）。
+  ensureColumn('orders', 'placed_by', 'placed_by INTEGER');
+  ensureColumn('orders', 'placed_by_role', 'placed_by_role TEXT');
+  ensureColumn('orders', 'placed_by_name', 'placed_by_name TEXT');
   ['customers', 'products', 'inventory', 'orders', 'order_items', 'price_systems', 'deliveries', 'delivery_items', 'customer_prices', 'customer_discounts'].forEach(t => ensureColumn(t, 'book_id', 'book_id INTEGER DEFAULT 1'));
 } catch (e) { console.error('migrate:', e.message); }
 
@@ -420,9 +494,9 @@ try {
   }
 } catch (e) { console.error('migrate settings:', e.message); }
 
-// ---------- 种子：示例套账套账 + 老板账户 + 角色 ----------
+// ---------- 种子：示例套账 + 老板账户 + 角色 ----------
 function seed() {
-  // 1) 示例套账套账（把现有全部业务数据归属 book_id=1）
+  // 1) 示例套账（把现有全部业务数据归属 book_id=1）
   let book = db.prepare('SELECT * FROM books WHERE id=1').get();
   if (!book) {
     db.prepare('INSERT INTO books(id,name,owner_account_id) VALUES(1,?,NULL)').run('示例套账');
@@ -459,7 +533,7 @@ function seed() {
     if (usingDefault) {
       console.log('\n' + '='.repeat(64));
       console.log('⚠️  安全告警：当前使用源码内置的默认账号密码（admin / admin123）。');
-      console.log('   这是公开在 GitHub 上的默认凭据，任何人都能用它登录你的系统。');
+      console.log('   这是公开在 GitHub 上的默认凭据，任何人都用它登录你的系统。');
       console.log('   请立即：设置环境变量 ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD 后重启，');
       console.log('   或登录后到「设置」页修改密码。');
       console.log('='.repeat(64) + '\n');
@@ -469,7 +543,7 @@ function seed() {
   // 2.1) 平台管理员：默认即老板账号。
   // 与「套账老板」解耦 —— is_admin=1 才能看全平台用户 / 违规记录 / 执行封禁。
   // 用环境变量 ERP_ADMIN_ACCOUNTS 覆盖（逗号分隔），默认只有这一个。
-  const adminList = (process.env.ERP_ADMIN_ACCOUNTS || bossUser).split(',').map(s => s.trim()).filter(Boolean);
+  const adminList = (process.env.ERP_ADMIN_ACCOUNTS || 'admin').split(',').map(s => s.trim()).filter(Boolean);
   for (const u of adminList) {
     const r = db.prepare('UPDATE accounts SET is_admin=1 WHERE username=?').run(u);
     if (r.changes === 0) console.log('[moderation] 管理员账号不存在，跳过标记: ' + u);
@@ -502,15 +576,6 @@ function seed() {
   }
 }
 seed();
-
-// 默认密码持续告警：只要库里 admin 账号仍是默认密码，每次启动都提醒一次。
-// 只比对哈希、不打印明文，避免日志里再泄一次。
-try {
-  const a = db.prepare("SELECT username, password FROM accounts WHERE username='admin'").get();
-  if (a && verifyPassword && verifyPassword('admin123', a.password)) {
-    console.log('⚠️  安全告警：账号 admin 仍在使用默认密码 admin123，请到「设置」页修改。');
-  }
-} catch (e) { /* verifyPassword 未导出时静默跳过 */ }
 
 // ---------- 性能索引：绝大多数查询以 book_id 为入口并 ORDER BY id DESC ----------
 // 建索引后读查询走索引而非全表扫描；随业务量增长，开单/盘点/统计不会变慢。

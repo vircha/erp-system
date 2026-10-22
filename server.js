@@ -47,7 +47,10 @@ const ROLES = {
       // 🔴 2026-10-18 补齐：注释里写明经理「可看分析」，但 perms 漏了 analysis.view，
       //    且 /api/report/stock-alert 要 inventory.view —— 经理有 edit 却没有 view，
       //    结果经理既看不到「报表」菜单，库存预警接口还直接 403。
-      'inventory.view', 'analysis.view'
+      'inventory.view', 'analysis.view',
+      // 🔴 2026-10-21 采购与库存：经理可看采购建议/采购单、可建采购单（建单即入库）。
+      //    staff 不给（采购进价是成本信息）；customer 不给（perms 里没有 → need() 直接 403）。
+      'purchase.view', 'purchase.edit'
     ]
   },
   staff: {
@@ -373,32 +376,6 @@ function newSession(account) {
   SESSIONS.set(tok, { account_id: account.id, book_id: account.book_id, ts: Date.now() });
   return tok;
 }
-/**
- * 取一组 product_id 在给定区间内**最新一条明细**的快照（name/spec/unit/barcode/cost）。
- *
- * 🔴🔴 2026-10-20 经理需求「商品信息变动不影响历史已开出的订单」。
- *   报表按 product_id 聚合时，显示名/规格/单位**必须统一取一个值**：
- *   原来 SQL 里 `GROUP BY oi.product_id, oi.product_name`，商品改名后同一个
- *   product_id 被**拆成两组**，销量/金额被割裂（同一商品在报表里出现两行，各算一半）。
- *   ✅ 正解：SQL 只按 product_id 分组（数字永远合并），
- *      显示用的名称/规格/单位单独取区间内**最新**明细的快照。
- */
-function latestItemSnapshots(bookId, pids, whereSql, args) {
-  const map = new Map();
-  if (!Array.isArray(pids) || !pids.length) return map;
-  const uniq = [...new Set(pids.filter(v => v != null))];
-  if (!uniq.length) return map;
-  const ph = uniq.map(() => '?').join(',');
-  let sql = `SELECT oi.product_id, oi.product_name, oi.spec, oi.unit, oi.barcode, oi.cost
-             FROM order_items oi JOIN orders o ON o.id=oi.order_id
-             WHERE oi.book_id=? AND oi.product_id IN (${ph}) ${whereSql || ''}
-             ORDER BY oi.id ASC`;
-  const rows = db.prepare(sql).all(bookId, ...uniq, ...(args || []));
-  // 升序遍历 → 后写入的覆盖前面的 → 最终留下**最新**那条
-  for (const r of rows) map.set(r.product_id, r);
-  return map;
-}
-
 function ctxOf(req) {
   const h = req.headers['authorization'] || '';
   const tok = h.startsWith('Bearer ') ? h.slice(7) : '';
@@ -443,6 +420,38 @@ function recordCustomerPrices(bookId, customerId, items, discount, orderId) {
   } catch (e) { console.error('recordCustomerPrices:', e.message); }
 }
 
+/**
+ * 取一组 product_id 在给定区间内**最新一条明细**的快照（name/spec/unit/barcode/cost）。
+ *
+ * 🔴🔴 2026-10-20 经理需求「商品信息变动不影响历史已开出的订单」。
+ *   报表按 product_id 聚合时，显示名/规格/单位**必须统一取一个值**：
+ *   原来 SQL 里 `GROUP BY oi.product_id, oi.product_name`，商品改名后同一个
+ *   product_id 被**拆成两组**，销量/金额被割裂（同一商品在报表里出现两行，各算一半）。
+ *   ✅ 正解：SQL 只按 product_id 分组（数字永远合并），
+ *      显示用的名称/规格/单位单独取区间内**最新**明细的快照。
+ *
+ * @param {number} bookId
+ * @param {number[]} pids       要取快照的 product_id 列表
+ * @param {string} whereSql     附加条件，形如 ' AND date(...)>=?'（可空）
+ * @param {Array}  args         whereSql 对应的参数
+ * @returns {Map<number, {product_name,spec,unit,barcode,cost}>}
+ */
+function latestItemSnapshots(bookId, pids, whereSql, args) {
+  const map = new Map();
+  if (!Array.isArray(pids) || !pids.length) return map;
+  const uniq = [...new Set(pids.filter(v => v != null))];
+  if (!uniq.length) return map;
+  const ph = uniq.map(() => '?').join(',');
+  let sql = `SELECT oi.product_id, oi.product_name, oi.spec, oi.unit, oi.barcode, oi.cost
+             FROM order_items oi JOIN orders o ON o.id=oi.order_id
+             WHERE oi.book_id=? AND oi.product_id IN (${ph}) ${whereSql || ''}
+             ORDER BY oi.id ASC`;
+  const rows = db.prepare(sql).all(bookId, ...uniq, ...(args || []));
+  // 升序遍历 → 后写入的覆盖前面的 → 最终留下**最新**那条
+  for (const r of rows) map.set(r.product_id, r);
+  return map;
+}
+
 // ---------- 单品折扣工具 ----------
 // 明细的折前单价 × 单品折扣率 = 成交单价（四舍五入到分）
 function itemDisc(it) {
@@ -457,6 +466,12 @@ function lineCalc(origPrice, qty, disc) {
 }
 
 // ---------- 工具 ----------
+// 下单日期口径：与前端 <input type="date"> 的 value 格式一致（YYYY-MM-DD）。
+// 🔴 不能用 ymdToday()：那是 YYYYMMDD（8 位），塞进 orders.order_date 会跟前端筛选对不上。
+function ymdTodayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 function ymdToday() {
   const d = new Date();
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
@@ -489,6 +504,8 @@ function nextSeqNo(prefix, table, col) {
 function genOrderNo(bookId) { return nextSeqNo('XS', 'orders', 'order_no'); }
 function genDeliveryNo(bookId) { return nextSeqNo('DH', 'deliveries', 'delivery_no'); }
 function genReturnNo(bookId) { return nextSeqNo('TH', 'orders', 'order_no'); }
+// 采购单号：CG + 日期 + 4 位流水（与销售 XS / 退货 TH 同一套 nextSeqNo 逻辑）
+function genPurchaseNo(bookId) { return nextSeqNo('CG', 'purchases', 'purchase_no'); }
 function getSetting(bookId, key, fallback) {
   try {
     const r = db.prepare('SELECT value FROM settings WHERE book_id=? AND key=?').get(bookId, key);
@@ -1297,8 +1314,20 @@ async function handleApi(req, res, u) {
       String(b.spec == null ? '' : b.spec), String(b.unit == null ? '个' : b.unit),
       Number(b.price) || 0, Number(b.cost) || 0,
       Math.max(0, Math.round(Number(b.pack_size))) || 0, m[1]);
-    db.prepare('INSERT OR IGNORE INTO inventory(book_id,product_id,qty,low_threshold) VALUES(?,?,?,?)').run(bookId, m[1], Number(b.qty) || 0, Number(b.low_threshold) || 0);
-    db.prepare('UPDATE inventory SET qty=?, low_threshold=? WHERE product_id=?').run(Number(b.qty) || 0, Number(b.low_threshold) || 0, m[1]);
+    // 🔴 2026-10-21 修 Bug A：原来这里无条件把库存写成 Number(b.qty)||0，
+    //   而网页端编辑商品的表单**根本没有 qty 字段** → Number(undefined)||0 = 0
+    //   → 经理每改一次商品名，这个商品的库存就被清零（生产库 108 个商品里 81 个账面是 0）。
+    //   现在改成：报文里带 qty 才写库存数量，带 low_threshold 才写预警阈值；都不带就完全不动库存。
+    //   ⚠️ 只阻止「今后被清零」，**不回改历史数据**（历史差异由 /api/inventory/summary 的 diff 字段呈现）。
+    const _hasQty = (b.qty !== undefined && b.qty !== null && b.qty !== '');
+    const _hasThr = (b.low_threshold !== undefined && b.low_threshold !== null && b.low_threshold !== '');
+    if (_hasQty || _hasThr) {
+      const _inv = db.prepare('SELECT qty, low_threshold FROM inventory WHERE product_id=?').get(m[1]);
+      const _nq = _hasQty ? (Number(b.qty) || 0) : (_inv ? (Number(_inv.qty) || 0) : 0);
+      const _nt = _hasThr ? (Number(b.low_threshold) || 0) : (_inv ? (Number(_inv.low_threshold) || 0) : 0);
+      db.prepare('INSERT OR IGNORE INTO inventory(book_id,product_id,qty,low_threshold) VALUES(?,?,?,?)').run(bookId, m[1], _nq, _nt);
+      db.prepare('UPDATE inventory SET qty=?, low_threshold=? WHERE product_id=?').run(_nq, _nt, m[1]);
+    }
     // MOD：改名后重新检测；若已不含违规词则把 pending 记录置为 resolved
     const v = MOD ? MOD.scanAndRecord(bookId, ctx.account.id, 'product', Number(m[1]), String(b.name || ''), 'name', b.name) : null;
     return sendJSON(res, 200, v ? { ok: true, violation: v } : { ok: true });
@@ -1345,6 +1374,263 @@ async function handleApi(req, res, u) {
     const rows = db.prepare("SELECT p.id,p.name,p.spec,p.unit,p.price,COALESCE(i.qty,0) as qty,COALESCE(i.low_threshold,0) as low_threshold FROM products p LEFT JOIN inventory i ON i.product_id=p.id WHERE p.book_id=? ORDER BY p.id DESC").all(bookId);
     return sendJSON(res, 200, rows);
   }
+  // ================= 采购与库存（2026-10-21；管家婆「以销定购」口径）=================
+  // 🔴 业务口径（经理 2026-10-21 明确）：
+  //    「采购量按已有订单数量为准，实现采购入库 - 销售单 = 库存 0（不积压）」
+  //    公式：建议采购量 = max(0, 净销售数量 - 已采购入库数量)
+  //      净销售数量 = Σ order_items.qty（销售单为正、退货单为负，自动抵消）
+  //      已采购入库 = Σ purchase_items.qty（status='received' 的采购单）
+  //    ✅ 这个式子**故意不依赖 inventory.qty**：账面库存有历史误差，但采购建议必须准。
+  //    ✅ 采购入库后：库存 = (已入库 - 已销) + (已销 - 已入库) = 0，天然满足经理要的口径。
+  // 🔴 三张新表（suppliers / purchases / purchase_items）与 orders 完全独立，
+  //    采购数据不可能污染销售数据；stock_moves 记录采购引起的库存变动。
+  // 🔴 权限：manager/boss 有 purchase.view + purchase.edit；staff 不给（采购进价是成本信息）；
+  //    customer 更不给（perms 里没有，need() 直接 403）。
+  // ============================================================
+
+  // ---- 供应商 ----
+  if (p === '/api/suppliers' && method === 'GET') {
+    if (!need('purchase.view')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能查看采购数据' });
+    const rows = db.prepare('SELECT * FROM suppliers WHERE book_id=? ORDER BY name ASC').all(bookId);
+    return sendJSON(res, 200, rows);
+  }
+  if (p === '/api/suppliers' && method === 'POST') {
+    if (!need('purchase.edit')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能新增供应商' });
+    const b = await getBody(req).catch(() => ({}));
+    const name = String(b.name || '').trim();
+    if (!name) return sendJSON(res, 400, { error: '供应商名称不能为空' });
+    const r = db.prepare('INSERT INTO suppliers(book_id,name,contact,phone,remark) VALUES(?,?,?,?,?)')
+      .run(bookId, name, String(b.contact || ''), String(b.phone || ''), String(b.remark || ''));
+    return sendJSON(res, 200, { id: Number(r.lastInsertRowid), name });
+  }
+
+  // ---- 采购建议（以销定购）：按已有销售单数量算该采购多少 ----
+  if (p === '/api/purchase-suggestions' && method === 'GET') {
+    if (!need('purchase.view')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能查看采购数据' });
+    const rows = db.prepare(`
+      SELECT p.id, p.name, p.spec, p.unit, p.barcode,
+             COALESCE(p.cost,0) cost, COALESCE(p.price,0) price,
+             COALESCE(s.sold,0) sold_qty,
+             COALESCE(pc.in_qty,0) in_qty,
+             COALESCE(i.qty,0) stock_qty,
+             COALESCE(s.sold,0) - COALESCE(pc.in_qty,0) suggest_qty
+      FROM products p
+      LEFT JOIN inventory i ON i.product_id = p.id
+      LEFT JOIN (SELECT oi.product_id pid, SUM(oi.qty) sold
+                   FROM order_items oi
+                  WHERE oi.book_id = ? GROUP BY oi.product_id) s ON s.pid = p.id
+      LEFT JOIN (SELECT pi.product_id pid, SUM(pi.qty) in_qty
+                   FROM purchases pu JOIN purchase_items pi ON pi.purchase_id = pu.id
+                  WHERE pu.book_id = ? AND pu.status = 'received'
+                  GROUP BY pi.product_id) pc ON pc.pid = p.id
+      WHERE p.book_id = ?
+      ORDER BY suggest_qty DESC, p.name ASC
+      LIMIT 500`).all(bookId, bookId, bookId);
+    return sendJSON(res, 200, rows.map(r => {
+      const sold = +(r.sold_qty || 0).toFixed(2);
+      const inQ = +(r.in_qty || 0).toFixed(2);
+      const raw = +(sold - inQ).toFixed(2);
+      const sug = raw > 0.005 ? raw : 0;
+      // 🔴 2026-10-21 经理确认：推导库存为负按 0（没进货就是 0，不是亏空）。
+      //    必须与「库存重算」写入的账面口径完全一致，否则账实差异列会自相矛盾
+      //    （重算后账面是 0，这里还返回 -48 → 差异反而变大）。
+      const derive = +(inQ - sold) > 0 ? +(inQ - sold).toFixed(2) : 0;
+      return {
+        ...r, sold_qty: sold, in_qty: inQ, stock_qty: +(r.stock_qty || 0).toFixed(2),
+        suggest_qty: sug,
+        // 采购入库后的预计账面库存（账面有历史误差时不一定为 0，差异见 diff）
+        stock_after: +((Number(r.stock_qty) || 0) + sug).toFixed(2),
+        derive_qty: derive,
+        // 账面 vs 推导的差 = 历史误差（老账被清零 / 期初库存），只呈现不自动改
+        // 🔴 2026-10-21：derive 已是 clamp 后的值，这里直接减，不要再自己算一遍
+        diff: +((Number(r.stock_qty) || 0) - derive).toFixed(2)
+      };
+    }));
+  }
+
+  // ---- 库存明细汇总（账面 / 推导 / 差异 三口径对照）----
+  if (p === '/api/inventory/summary' && method === 'GET') {
+    if (!need('inventory.view')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能查看库存' });
+    const kw = String(u.searchParams.get('kw') || '').trim();
+    const only = String(u.searchParams.get('only') || '');
+    const w = ['p.book_id = ?'], a = [bookId];
+    if (kw) { w.push('(p.name LIKE ? OR p.barcode LIKE ?)'); a.push('%' + kw + '%', '%' + kw + '%'); }
+    if (only === 'alert') w.push('COALESCE(i.low_threshold,0) > 0 AND COALESCE(i.qty,0) <= COALESCE(i.low_threshold,0)');
+    if (only === 'neg') w.push('COALESCE(i.qty,0) < 0');
+    // 🔴 2026-10-21：推导库存负数按 0，与 /derive_qty 返回值和「库存重算」口径完全一致。
+    //    SQL 侧也必须clamp，否则筛选出来的行数和页面上显示的 diff 对不上。
+    if (only === 'diff') w.push('ABS(COALESCE(i.qty,0) - MAX(0, COALESCE(pc.in_qty,0) - COALESCE(s.sold,0))) > 0.005');
+    const rows = db.prepare(`
+      SELECT p.id, p.name, p.spec, p.barcode, p.unit,
+             COALESCE(i.qty,0) stock_qty,
+             COALESCE(i.low_threshold,0) low_threshold,
+             COALESCE(s.sold,0) sold_qty,
+             COALESCE(pc.in_qty,0) in_qty,
+             (SELECT MAX(sm.created_at) FROM stock_moves sm WHERE sm.product_id = p.id AND sm.book_id = p.book_id) last_move
+      FROM products p
+      LEFT JOIN inventory i ON i.product_id = p.id
+      LEFT JOIN (SELECT oi.product_id pid, SUM(oi.qty) sold FROM order_items oi
+                  WHERE oi.book_id = ? GROUP BY oi.product_id) s ON s.pid = p.id
+      LEFT JOIN (SELECT pi.product_id pid, SUM(pi.qty) in_qty
+                   FROM purchases pu JOIN purchase_items pi ON pi.purchase_id = pu.id
+                  WHERE pu.book_id = ? AND pu.status = 'received'
+                  GROUP BY pi.product_id) pc ON pc.pid = p.id
+      WHERE ${w.join(' AND ')}
+      ORDER BY p.name ASC LIMIT 500`).all(bookId, bookId, ...a);
+    return sendJSON(res, 200, rows.map(r => {
+      const sold = +(r.sold_qty || 0).toFixed(2), inQ = +(r.in_qty || 0).toFixed(2);
+      const st = +(r.stock_qty || 0).toFixed(2);
+      // 🔴 2026-10-21：与采购建议同一口径 —— 推导库存负数按 0
+      const dv = (inQ - sold) > 0 ? +(inQ - sold).toFixed(2) : 0;
+      return { ...r, stock_qty: st, sold_qty: sold, in_qty: inQ,
+        derive_qty: dv, diff: +(st - dv).toFixed(2) };
+    }));
+  }
+
+  // ---- 库存流水：采购侧读 stock_moves；销售侧从 order_items 反推（不改既有销售逻辑）----
+  if (p === '/api/stock-moves' && method === 'GET') {
+    if (!need('inventory.view')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能查看库存流水' });
+    const pid = u.searchParams.get('product_id');
+    const w = ['book_id = ?'], a = [bookId];
+    if (pid) { w.push('product_id = ?'); a.push(Number(pid)); }
+    const pur = db.prepare(`
+      SELECT id, created_at ts, product_id, product_name, move_type, qty,
+             ref_type, ref_id, ref_no, remark, operator, 'purchase' source
+        FROM stock_moves WHERE ${w.join(' AND ')} ORDER BY id DESC LIMIT 300`).all(...a);
+    const sw = ['o.book_id = ?'], sa = [bookId];
+    if (pid) { sw.push('oi.product_id = ?'); sa.push(Number(pid)); }
+    const sal = db.prepare(`
+      SELECT oi.id, o.created_at ts, oi.product_id, oi.product_name,
+             CASE WHEN oi.qty < 0 THEN 'sale_return' ELSE 'sale_out' END move_type,
+             -oi.qty qty, 'order' ref_type, o.id ref_id, o.order_no ref_no,
+             CASE WHEN o.status = 'returned' THEN '销售退货入库' ELSE '销售出库' END remark,
+             '' operator, 'sale' source
+        FROM order_items oi JOIN orders o ON o.id = oi.order_id
+       WHERE ${sw.join(' AND ')} ORDER BY oi.id DESC LIMIT 300`).all(...sa);
+    const all = pur.concat(sal).sort((x, y) => (x.ts < y.ts ? 1 : x.ts > y.ts ? -1 : 0));
+    return sendJSON(res, 200, all);
+  }
+
+  // ---- 采购单列表 ----
+  if (p === '/api/purchases' && method === 'GET') {
+    if (!need('purchase.view')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能查看采购数据' });
+    const rows = db.prepare(`
+      SELECT pu.*, (SELECT COUNT(*) FROM purchase_items pi WHERE pi.purchase_id = pu.id) item_count
+        FROM purchases pu WHERE pu.book_id = ? ORDER BY pu.id DESC LIMIT 200`).all(bookId);
+    return sendJSON(res, 200, rows.map(r => ({
+      ...r, total: +(r.total || 0).toFixed(2), payable: +(r.payable || 0).toFixed(2)
+    })));
+  }
+
+  // ---- 新建采购单（建单即入库）----
+  if (p === '/api/purchases' && method === 'POST') {
+    if (!need('purchase.edit')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能提交采购单' });
+    const b = await getBody(req).catch(() => ({}));
+    const items = Array.isArray(b.items) ? b.items : [];
+    if (!items.length) return sendJSON(res, 400, { error: '采购明细不能为空' });
+    // 🔴 事务外先校验完所有明细再 BEGIN（BEGIN 内 sendJSON(400) 会跳过 ROLLBACK → 悬挂事务）
+    const lines = [];
+    for (const it of items) {
+      const pid = Number(it.product_id);
+      const prod = db.prepare('SELECT * FROM products WHERE id=? AND book_id=?').get(pid, bookId);
+      if (!prod) return sendJSON(res, 400, { error: '商品不存在：' + pid });
+      const qty = Number(it.qty);
+      if (!isFinite(qty) || qty <= 0) return sendJSON(res, 400, { error: '数量必须大于 0：' + prod.name });
+      const price = it.price != null ? Number(it.price) : (Number(prod.cost) || 0);
+      if (!isFinite(price) || price < 0) return sendJSON(res, 400, { error: '进价不合法：' + prod.name });
+      const subtotal = +(qty * price).toFixed(2);
+      lines.push({ prod, qty, price, subtotal });
+    }
+    const total = +lines.reduce((s, l) => s + l.subtotal, 0).toFixed(2);
+    const discount = b.discount != null ? Number(b.discount) : 1;
+    if (!isFinite(discount) || discount <= 0 || discount > 1) return sendJSON(res, 400, { error: '折扣必须在 0~1 之间' });
+    const payable = +(total * discount).toFixed(2);
+    const purchase_no = genPurchaseNo(bookId);
+    const _acc = ctx && ctx.account ? ctx.account : null;
+    const opName = _acc ? (_acc.display_name || _acc.username || '') : '';
+
+    db.exec('BEGIN');
+    try {
+      const r = db.prepare(`INSERT INTO purchases(book_id,purchase_no,supplier_id,supplier_name,total,payable,discount,purchase_date,status,remark,placed_by,placed_by_role,placed_by_name)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(bookId, purchase_no, b.supplier_id ? Number(b.supplier_id) : null, String(b.supplier_name || ''),
+             total, payable, discount, b.purchase_date || ymdTodayISO(), 'received', String(b.remark || ''),
+             _acc ? _acc.id : null, _acc ? (_acc.role || '') : '', opName);
+      const pid = Number(r.lastInsertRowid);
+      for (const l of lines) {
+        db.prepare(`INSERT INTO purchase_items(book_id,purchase_id,product_id,product_name,spec,barcode,unit,qty,price,subtotal)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)`)
+          .run(bookId, pid, l.prod.id, l.prod.name, l.prod.spec || '', l.prod.barcode || '', l.prod.unit || '个', l.qty, l.price, l.subtotal);
+        // 入库：库存加。口径与既有 7 处一致（WHERE product_id=?，不带 book_id）
+        const invRow = db.prepare('SELECT qty FROM inventory WHERE product_id=?').get(l.prod.id);
+        const before = invRow ? (Number(invRow.qty) || 0) : 0;
+        if (!invRow) db.prepare('INSERT OR IGNORE INTO inventory(book_id,product_id,qty,low_threshold) VALUES(?,?,0,0)').run(bookId, l.prod.id);
+        db.prepare("UPDATE inventory SET qty=qty+?, updated_at=datetime('now','localtime') WHERE product_id=?").run(l.qty, l.prod.id);
+        const after = +(before + l.qty).toFixed(2);
+        db.prepare(`INSERT INTO stock_moves(book_id,product_id,product_name,move_type,qty,before_qty,after_qty,ref_type,ref_id,ref_no,remark,operator)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(bookId, l.prod.id, l.prod.name, 'purchase_in', l.qty, before, after, 'purchase', pid, purchase_no, '采购入库', opName);
+      }
+      db.exec('COMMIT');
+      return sendJSON(res, 200, { id: pid, purchase_no, total, payable, item_count: lines.length });
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch (_) { }
+      console.error('createPurchase:', (e && e.message) || e);
+      return sendJSON(res, 500, { error: String((e && e.message) || e) });
+    }
+  }
+
+  // ---- 采购单详情 / 作废 ----
+  m = p.match(/^\/api\/purchases\/(\d+)$/);
+  if (m && method === 'GET') {
+    if (!need('purchase.view')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能查看采购数据' });
+    const one = db.prepare('SELECT * FROM purchases WHERE id=? AND book_id=?').get(Number(m[1]), bookId);
+    if (!one) return sendJSON(res, 404, { error: '采购单不存在' });
+    const items = db.prepare('SELECT * FROM purchase_items WHERE purchase_id=? ORDER BY id').all(Number(m[1]));
+    return sendJSON(res, 200, {
+      ...one, total: +(one.total || 0).toFixed(2), payable: +(one.payable || 0).toFixed(2),
+      items: items.map(i => ({ ...i, qty: +(i.qty || 0).toFixed(2), price: +(i.price || 0).toFixed(2), subtotal: +(i.subtotal || 0).toFixed(2) }))
+    });
+  }
+  if (m && method === 'DELETE') {
+    if (!need('purchase.edit')) return;
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号不能作废采购单' });
+    const id = Number(m[1]);
+    const one = db.prepare('SELECT * FROM purchases WHERE id=? AND book_id=?').get(id, bookId);
+    if (!one) return sendJSON(res, 404, { error: '采购单不存在' });
+    if (one.status === 'void') return sendJSON(res, 400, { error: '该采购单已作废' });
+    const items = db.prepare('SELECT * FROM purchase_items WHERE purchase_id=?').all(id);
+    const _acc = ctx && ctx.account ? ctx.account : null;
+    const opName = _acc ? (_acc.display_name || _acc.username || '') : '';
+    db.exec('BEGIN');
+    try {
+      for (const it of items) {
+        const q = Number(it.qty || 0);
+        const invRow = db.prepare('SELECT qty FROM inventory WHERE product_id=?').get(it.product_id);
+        const before = invRow ? (Number(invRow.qty) || 0) : 0;
+        db.prepare("UPDATE inventory SET qty=qty+?, updated_at=datetime('now','localtime') WHERE product_id=?").run(-q, it.product_id);
+        const after = +(before - q).toFixed(2);
+        db.prepare(`INSERT INTO stock_moves(book_id,product_id,product_name,move_type,qty,before_qty,after_qty,ref_type,ref_id,ref_no,remark,operator)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(bookId, it.product_id, it.product_name, 'purchase_void', -q, before, after, 'purchase', id, one.purchase_no, '采购作废回退', opName);
+      }
+      db.prepare('UPDATE purchases SET status=? WHERE id=?').run('void', id);
+      db.exec('COMMIT');
+      return sendJSON(res, 200, { ok: true, voided: id });
+    } catch (e) {
+      try { db.exec('ROLLBACK'); } catch (_) { }
+      console.error('voidPurchase:', (e && e.message) || e);
+      return sendJSON(res, 500, { error: String((e && e.message) || e) });
+    }
+  }
   m = p.match(/^\/api\/inventory\/(\d+)$/);
   if (m && method === 'DELETE') {
     if (!need('inventory.edit')) return;
@@ -1373,6 +1659,18 @@ async function handleApi(req, res, u) {
       }
       b.discount = 1;
     }
+    // 🔴🔴🔴 2026-10-19 客户「不能改折扣及金额」的**唯一可靠防线**在这里。
+    //   前端把单价/折扣 input 设成 readonly 只算交互层 —— 改报文照样能提交任意价格，
+    //   而 price 直接决定 payable（应收金额），等于把定价权交给了客户。
+    //   做法：逐行忽略报文里的 it.price / it.discount，强制取该门店的权威记忆
+    //   customer_prices.price（折前单价）+ customer_prices.discount（单品折扣）。
+    //   没有历史价的行退回 prod.price、discount=1 —— 与前端 priceFor() 的兜底口径一致，
+    //   否则会出现「前端显示一个价、服务端按另一个价算钱」。
+    const _forceStorePrice = isCustomer(ctx) && b.type !== 'return';
+    if (_forceStorePrice) {
+      // 下单日期锁当天：客户改报文把单子落到别的日期会污染当日销售统计与对账
+      b.order_date = ymdTodayISO();
+    }
     if (!b.customer_id) return sendJSON(res, 400, { error: '请选择客户' });
     if (!Array.isArray(b.items) || b.items.length === 0) return sendJSON(res, 400, { error: '请添加商品' });
     const cust = db.prepare('SELECT * FROM customers WHERE id=? AND book_id=?').get(b.customer_id, bookId);
@@ -1390,7 +1688,17 @@ async function handleApi(req, res, u) {
       // 单品折扣：it.price 视为「折前单价」，乘 it.discount 得成交单价。
       // 不传 discount 的行按 1 处理（不打折），所以「有的单品有折扣，有的没有」天然支持。
       let c;
-      if (it.discount != null) {
+      if (_forceStorePrice) {
+        // 客户角色：报文里的 it.price / it.discount **一律忽略**
+        const cp = db.prepare('SELECT price, discount FROM customer_prices WHERE book_id=? AND customer_id=? AND product_id=?')
+                    .get(bookId, b.customer_id, prod.id);
+        const dp = cp ? Number(cp.price) : NaN;
+        // 无历史价（或历史价为 0/脏数据）→ 退回商品基础价，与前端 priceFor() 同口径
+        const op = (isFinite(dp) && dp > 0) ? dp : (Number(prod.price) || 0);
+        let dd = cp ? Number(cp.discount) : NaN;
+        dd = (isFinite(dd) && dd > 0) ? Math.min(1, Math.max(0.1, dd)) : 1;
+        c = lineCalc(op, qty, dd);
+      } else if (it.discount != null) {
         c = lineCalc(it.price !== undefined ? it.price : prod.price, qty, it.discount);
       } else {
         // 没带 discount 时保持旧行为：price 就是成交价（兼容老调用方/表格批量开单）
@@ -1413,7 +1721,10 @@ async function handleApi(req, res, u) {
     let orderId = 0;
     db.exec('BEGIN');
     try {
-      const oi = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark) VALUES(?,?,?,?,?,?,?,?,?,?)").run(bookId, order_no, cust.id, cust.name, totalSigned, payableSigned, discount, b.order_date || null, isReturn ? 'returned' : (b.status || 'paid'), b.remark || (isReturn ? '销售退货' : ''));
+      // 🔴 记录「这张单是谁下的」：客户账号下的单在管理界面要有显眼标识，
+      //    否则一堆单子里分不清是客户自己下的还是业务员代开的。
+      const _acc = ctx && ctx.account ? ctx.account : null;
+      const oi = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,placed_by,placed_by_role,placed_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, order_no, cust.id, cust.name, totalSigned, payableSigned, discount, b.order_date || null, isReturn ? 'returned' : (b.status || 'paid'), b.remark || (isReturn ? '销售退货' : ''), _acc ? _acc.id : null, _acc ? (_acc.role || '') : '', _acc ? (_acc.display_name || _acc.username || '') : '');
       orderId = oi.lastInsertRowid;
       for (const L of lines) {
         const sq = L.qty * sign;                                  // 落库数量：退货为负
@@ -1714,7 +2025,7 @@ async function handleApi(req, res, u) {
     }
     const items = db.prepare('SELECT product_id, qty FROM order_items WHERE order_id=?').all(o.id);
     // 撤销建单时的库存影响：建单是 `qty += -明细qty`，所以删除必须是 `qty += +明细qty`。
-    // 明细 qty 本身带符号（销售单正、���货单负），所以两种单据方向自动正确，
+    // 明细 qty 本身带符号（销售单正、退货单负），所以两种单据方向自动正确，
     // 不需要再按 return_of 额外翻符号（那反而会错）。
     db.exec('BEGIN');
     try {
@@ -2214,7 +2525,8 @@ async function handleApi(req, res, u) {
     if (to) { w.push('date(COALESCE(o.order_date,o.created_at))<=?'); a.push(to); }
     const wh = w.length ? ' AND ' + w.join(' AND ') : '';
     // 🔴🔴 GROUP BY 只按 product_id：商品名/规格/单位会变（改名、改规格），
-    //   裸列 product_name/unit/spec 取的是**任意一行**，改名后显示名会随机跳。
+    //   放进 GROUP BY 会把同一个 product_id **拆成多组**，销量被割裂。
+    //   显示用的名称/规格/单位统一取区间内**最新**明细的快照。
     const rows = db.prepare(`
       SELECT oi.product_id,
              SUM(oi.qty) qty, SUM(oi.subtotal) sales,
@@ -2225,7 +2537,8 @@ async function handleApi(req, res, u) {
     const snap = latestItemSnapshots(bookId, rows.map(r => r.product_id), wh, a.slice(1));
     return sendJSON(res, 200, rows.map(r => {
       const sn = snap.get(r.product_id) || {};
-      return { ...r, product_name: sn.product_name || '', spec: sn.spec || '', unit: sn.unit || '',
+      return { ...r, product_name: sn.product_name || '', spec: sn.spec || '',
+               unit: sn.unit || '', barcode: sn.barcode || '',
                qty: r.qty || 0, sales: +(r.sales || 0).toFixed(2), profit: +(r.profit || 0).toFixed(2) };
     }));
   }
@@ -2375,8 +2688,7 @@ async function handleApi(req, res, u) {
     if (!need('analysis.view')) return;
     const dExpr = "date(COALESCE(o.order_date, o.created_at))";
     const date = u.searchParams.get('date') || (new Date().getFullYear() + '-' + String(new Date().getMonth() + 1).padStart(2, '0') + '-' + String(new Date().getDate()).padStart(2, '0'));
-    // 🔴🔴 GROUP BY 只按 customer_id + product_id：客户名/商品名/单位/成本都会变，
-    //   放进 GROUP BY 会把同一个 product_id 拆成多组，出货汇总里同一商品出现两行。
+    // 🔴🔴 同上：GROUP BY 只按 customer_id + product_id
     const lines = db.prepare(`
       SELECT o.customer_id as cid, o.customer_name as cname, oi.product_id as pid,
              SUM(oi.qty) as qty

@@ -1,8 +1,266 @@
 # 简单 ERP — 改动记录（CHANGELOG）
 
 > 本文件由 AI 每次改动后自动追加，倒序排列（最新在最上）。
+
+## 2026-10-22 — v5.7.2：网页版 + 手机版加载速度优化
+
+### 经理需求原文
+> `优化网页版及手机版加载速度`
+
+### 一、网页端：三个真凶（全部实测定位，不是猜）
+
+| # | 现象 | 根因 | 证据 |
+|---|---|---|---|
+| 1 | **304 完全不生效**，每次访问全量重下228KB | 宝塔 `proxy.conf` 里 `proxy_cache cache_one;` 是 **http 级全局**生效，而 `proxy_cache_convert_head` 默认 on → 上游回的 304 被 nginx 用本地缓存实体「补成」200，缓存里没有该实体（`no-cache` 响应只占 328K）→ 回源再取一次全量 | 回显法一锤定音：`add_header X-Dbg-INM $http_if_none_match` 打出 `W/"fea6f66f..."`（头收到了）但仍回 200；**直连 node 同 ETag 回 304** |
+| 2 | **HTTP/2 没开** | `erp.example.com.conf` 缺 `http2 on;`（同门的 `your-domain.cn.conf` 早有，只有这里漏了），首屏 17 个资源各开一条 TCP+TLS 连接 | 改前 `curl --http2` → `VERSION=1.1`；改后 → `VERSION=2`，ALPN 协商 `h2` |
+| 3 | **9 个静态资源没有版本号** | node 的 HTML 注入只覆盖 `app.js` + `style.css` 两个文件 | 改前 index.html 里 10 个引用只有 2 个带 `?v=` |
+
+### 二、具体改动
+
+**nginx（`erp.example.com.conf`）**
+- 静态资源（`/css/` `/js/` `/img/`）改为 **nginx 直接读盘**（`root /www/erp/public` + `try_files $uri =404`），不经反代 → 走 nginx 原生 ETag（`mtime-size`）+ `sendfile`，304 零 body
+- `proxy_cache_convert_head off`（`location /` 与 `/api/` 各一份）
+- `http2 on;`（nginx ≥1.25.1 新语法）
+- `proxy_buffering on;`（原来是 `off`，小响应头无法合并、拖累并发）
+- 新增 `map $arg_v $erp_st_cache`：**只有带 `?v=` 的地址**才给 `max-age=31536000, immutable`；不带的一律 `must-revalidate`
+- 静态资源目录加 `access_log off`
+
+**服务端（`server.js` 的 `serveStatic`）**
+- HTML 版本号注入：mtime → **内容哈希（sha1 前 10 位）**，范围从 2 个文件 → **全部 10 个 js/css**
+- `mtime+size` 做缓存键，文件没动直接复用哈希
+- 注入时**先摘出 HTML 注释再替换**（否则将来有人在注释里写 `href="css/style.css"` 就会被误注入成假版本号）
+
+**`index.html`**
+- 6 个 `<script>` 全部加 `defer` → 从**串行下载**变**并行下载**，执行顺序不变
+  （🔴 不能用 `async`：`apk_download.js` 依赖 `qrcode-mini.js` 的全局编码器）
+- `print_template.css` 加 `media="print"` → 打印时才加载，首屏不阻塞
+  （🔴 不能用 `media="not all"`：那等于永不应用，打印会没样式）
+
+**顺带堵掉一个源码泄露**
+- `public/js/` 下有两个 448KB 的备份文件 `app.js.bak_loginfix_*` / `app.js.bak_tplsync_*` **可被公网直接下载**（`curl` 返回 200）→ 已移到 `/www/backup/public_bak_files/`，现返回 404
+
+### 三、效果（Playwright 实测，Chromium，真实公网）
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| 304 命中 | **0 / 17** | **14 / 17**（剩 3 个是 index.html `no-store` + sw.js `no-cache`，本就不该缓存） |
+| 协议 | HTTP/1.1 | **HTTP/2**（1 条连接复用） |
+| 冷加载 DCL | 3237ms | **917ms** |
+| 冷加载 load | 3241ms | **2658ms** |
+| 二次加载 load | — | **1926ms** |
+| 二次加载实际传输 | 233766 B | **685 B**（10/12 资源走本地缓存） |
+
+### 四、手机端：R8 从没开过（APK 32.0MB → 22.9MB）
+
+- **`minifyEnabled false`** → 3 个 dex 合计 **45.6MB**，比全部原生 so 库（14.3MB）还大 3 倍
+  - 打开后：dex **45.6MB → 10.4MB**（3 个 dex 变 2 个），APK **32034841 → 22878691 B（-28.6%）**
+  - `shrinkResources true` 同步打开
+- `proguard-rules.pro` 原来只有 3 行（形同虚设），补齐 **Gson / Retrofit / MLKit / CameraX / DataStore / Compose / 协程** 全套 keep
+- 验证：
+  - **无 `missing_rules.txt`** = R8 没发现任何缺失的 keep 规则
+  - mapping 反查：`com.heping.erpnative.data.*` **1244 个类名全部原样保留**（Gson 反射路径完好）；被改名的 1247 个是 Compose 的 lambda 内部类（无反射需求）
+  - 签名 `CN=HePing ERP` / SHA-256 `4c4229b9...b5957` 与上一版一致 → 可覆盖升级
+  - 域名在 `classes2.dex` 命中 3 次，无 `example.com` 占位符泄漏
+
+**没缩的部分**：`libmlkit_google_ocr_pipeline.so` 10.0MB + `libbarhopper_v3.so` 4.9MB + MLKit 模型 assets 3.2MB —— 这是中文 OCR 与条码扫描的运行时，删了功能就没了，属于必要体积。
+
+### 五、回归
+- Playwright 12 断言全PASS：HTTP/2 生效 / `ERPTpl`·`ERPReceipt`·`ERPFeedback`·`__erpApk` 全就位（defer 后依赖顺序完好）/ 登录视图 705px 有实际高度 / style.css 已应用 / `feedback.css` 未被误改 media / `print_template.css` = print / 二次加载零传输 / **零 JS 运行时错误**
+- 线上采购库存回归 **56 PASS / 0 FAIL**，基线数据完全一致（accounts 4 / orders 47 / orderTotal 8143.04 / invQty 2）
+- 库存核对：108 行 / 有差异 0 / 推导负数 0 / 账面负数 0 / only=diff 0 行
+- `sw.js` CACHE bump 到 `erp-shell-v60`（否则改过前端文件浏览器仍用旧缓存）
+
+### 六、发版
+- 版本 **v5.7.2 / code 60** / `com.heping.erpnative` / 22878691 B
+- 顺序：`rclone copyto` 上 R2（21.819 MiB / 1.8s）→ 再跑 `refresh_apk_url_572.sh`（**新建带版本号副本，未覆盖主脚本**，主脚本 md5 仍 `b9caf0fda46322a0`）
+- 公网验证：`update.json` = 60 / 5.7.2 ✅；`/downloads/apk` → **HTTP/2 302** → R2 ✅
+- 公网 GET 下载的包 sha256 `55b0e67c...d73158` 与本地构建**完全一致**
+  （🔴 预签名 URL 不允许 HEAD，`curl -IL` 会得到 403 假警报，必须用 GET 验）
+
+## 2026-10-21 — v5.7.1：采购建议操作条改右侧悬浮（网页）+ 底部常驻（手机）
+
+### 经理反馈原文
+> `这几个改为浮动按钮 靠在右边  调整好ui      不然选好产品要滑到下面才能找到这几个按钮 太麻烦了`
+
+（截图：采购建议页底部那排「清空勾选 / 全选 / 按进价估算 / 加入采购单（2）」横条）
+
+### ① 网页端：底部横条 → 右侧悬浮常驻
+- 结构：`.pu-bar.pu-bar4`（4 列横排）→ `.pu-float`（`position:fixed`，贴视口右侧垂直居中）
+- 布局：主按钮「加入采购单」绿底置顶（132px 宽卡片 + 已选数量直接显示在按钮里）；
+  下面一行三个小灰钮「全选 / 估算 / 清空」
+- 左侧小把手（`›`）可**手动折叠**成 60px 窄胶囊，让出卡片区域；折叠状态存模块级变量，
+  重画后仍保持经理手动收/展的选择
+- 网格右侧留白 `.pu-grid{padding-right:150px}`，最右一列卡片不被压住（实测 1312 ≤ 1354）
+- 🔴 `z-index:30` **必须 < `.overlay`(50)**，否则会把「选商品 / 草稿」弹窗压住抢点击
+- 窄屏（≤640px / ≤400px）浮动条收窄至 104px / 88px，网格留白同步 116px / 100px
+- `sw.js` CACHE bump 到 `erp-shell-v59`
+
+### ② 手机端：底部条常驻 + 全选/清空并入
+- 原：底栏**只在勾选后**才出现，且「全选 / 清空勾选」在列表顶部统计卡下要滑才够得到
+- 改：底栏**常驻**（未勾选也显示，提示「未勾选」），
+  「全选 / 清空」从顶部挪到底部与「加入采购单」同排 → 抬拇指就够得到，一个都不用滑
+- 「全选」在已全选时 disabled、「清空」在未勾选时 disabled
+
+### 验证
+| 层 | 结果 |
+|---|---|
+| 网页 `_pw_v571.py` | **29 断言全 PASS / 0 FAIL**，零 JS 错误（含 375px 窄屏） |
+| 关键几何 | 悬浮条 `position=fixed` / right=1486（vw 1500）/ z=30 < overlay 50；最右卡片 1312 ≤ 悬浮条左 1354；折叠 132 → 60 → 132 |
+| 交互 | 勾 2 张 → 计数「已选 2」→ 滚到页面底部按钮仍在视野内 → 点按钮写入草稿「2 个商品 · 446 件 · ¥1200.79」 |
+| 弹窗 | 选商品弹窗 108 张卡片正常，悬浮条不抢点击；切子页签不残留 |
+| APK | versionCode 59 / versionName 5.7.1 / `com.heping.erpnative` / 32034841 B；签名 CN=HePing ERP SHA-256 `4c4229b9…5957`（与上一版一致，可覆盖升级）；dex 含 `erp.example.com`、无 example.com |
+
+---
+
+## 2026-10-21 — 库存重算 + 服务端推导口径统一（v5.7.0 追加，无新版本号）
+
+### ① 库存重算（经理拍板：把账面库存刷成推导值）
+- 口径：**新账面 = max(0, 已采购入库 − 已销售出库)**，负数按 0（没进货就是 0，不是亏空）
+- 事前盘点 → 26 个商品需重算（25 个推导为负按 0）
+- 执行链路：事前 `VACUUM INTO` 备份 → `BEGIN IMMEDIATE` 事务内逐行 UPDATE → 审计 TSV → 校验未对齐=0 → 事后备份 → 业务表逐表复核
+- 审计留档：`/www/backup/recalc_audit_20261021095337.tsv`（4 行头 + 26 商品，含旧值/新值/推导值/商品名）
+- 备份：`pre_recalc_20261021095337.db` / `post_recalc_20261021095337.db`（各 372736 B）
+- **账实数据零影响**：accounts 4 / customers 10 / products 108 / orders 47 / order_items 232 /
+  inventory 108 / orderTotal 8143.04 全部未变；只有 `inventory.qty` 合计 −833 → 2
+
+### ② 🔴 修掉重算暴露的口径不一致
+账面刷成推导值后，服务端 `derive_qty` 仍返回原始负数 → 页面「账实差异」不降反升（31 → 38 个 / 合计 1907）。
+`server.js` 4 处统一 clamp（198400 → 199139 B，sha256 `8ee2bebb05a1dee7`）：
+
+| 位置 | 改动 |
+|---|---|
+| P1 采购建议 derive | `+(inQ-sold) > 0 ? +(inQ-sold).toFixed(2) : 0` |
+| P2 采购建议 diff | 直接减已 clamp 的 derive（不再自己算一遍） |
+| P3 库存明细 SQL `only=diff` | `ABS(i.qty - MAX(0, in - sold)) > 0.005` |
+| P4 库存明细 derive_qty/diff | `const dv = (inQ-sold) > 0 ? ... : 0` |
+
+### ③ 手机端无需重新发版
+`Models.kt` 的 `deriveQty` / `diff` 只是直接显示服务端返回值，**无本地二次计算** → 服务端改口径后
+现有 v5.7.0 APK 连上即生效。已更新该处注释说明口径，不重发版。
+
+### ④ 顺手清理
+`/www/backup/` 3 个 0 字节坏备份已删（`prepurchase_20261021_141114.db` / `prepurchase_test.db` /
+`prepurchase_20261021_141043.db`）—— 空文件会误导「有备份」。
+
+### 验证
+| 层 | 结果 |
+|---|---|
+| 服务端 `_verify_clamp.js` | 108 行 / 有差异 0 / 推导负数 0 / 账面负数 0 / `only=diff` 0 行 / `only=neg` 0 行 |
+| 回归 `_regress_purchase.js` | **56 PASS / 0 FAIL**（新增 6 条 clamp 断言 + 注入偏差反向证明） |
+| 网页 `_pw_clamp.py` | **22 断言全 PASS / 0 FAIL**，零 JS 运行时错误 |
+| 数据盘点 | 有差异商品数 = 0，推导为负 = 0 |
+
 > 格式：`## 日期 — 标题` + 改了什么 + 为什么 + 影响范围 + 相关文件。
 > 手机版（Android 原生）改动请一并记在这里，方便下次接手时知道要动哪些文件。
+
+---
+
+## 2026-10-21 — v5.7.0：采购页UI 改版（两端同步；经理 4 条需求）
+
+经理需求原文：
+> `采购单商品页面调整为：双列或者三列四列（页面自适应，可以多选产品并填写好数量再返回采购单现在点一下就回去一下）
+> 然后采购首页的建议订单太占位置了，改为双列展示，建议订单里面的加入不知道有什么功能
+> 功能顺序改为：开单 订单 采购 商品 客户 这几个在前面  手机端同步`
+
+### 1. 采购建议：单列表格 → 多列卡片，**去掉每行「加入」按钮**
+
+| | 改前 | 改后 |
+|---|---|---|
+| 布局 | `.pu-tbl` 表格一行到底 / 手机端单列大卡 | 网页 `repeat(auto-fill,minmax(230px,1fr))` 网格，手机 `LazyVerticalGrid` 2 列 |
+| 加入方式 | 每行一个「加入」按钮（语义不清） | **点卡片 = 勾选/取消**，卡内直接改数量，底部「加入采购单（N）」一次性批量 |
+| 勾选态 | — | 网页 `PUR_PICKED`/`PUR_QTY`；手机 `sugPicked`/`sugQty`（都只在内存，不落库） |
+| 改数量的副作用 | — | 改数量会自动勾上该商品（网页 `oninput` → add id；手机 `togglePicked(id, qty)`） |
+
+- ✅ 经理原话「加入不知道有什么功能」→ 现在语义明确：勾选 → 批量加入。
+- ✅ 「太占位置」→ 宽屏网页 5 列、窄屏 2 列、手机 2 列（<360dp 降1 列防挤）。
+- 🔴 数量用 `Map` 存而不是回读DOM —— 重绘会丢焦点/丢值（网页 `PUR_QTY`）。
+- 🔴 卡片点击忽略 `.pu-cd-in` / `.pu-pk-row` 内的点击（点数量框不该切勾选）；用 `closest()` 判定，不要只判 `tagName==='INPUT'`（label 包裹时 target 可能是 label）。
+
+### 2. 选商品：单列列表 → 全屏多列网格 + 多选 + 填数量 + 一次性确认
+
+- 🔴 改前是**单列 `.pu-mv` 列表，点一下就 `closeModal()` 再 `puDraftModal()` 重开** —— 这就是经理说的「点一下就回去一下」。
+- 改后：同一层弹窗内多列网格（网页 108 张卡片 / 手机全屏 `GridCells.Fixed`按屏宽 1~4 列），
+  每卡有勾选框 + 数量 + 进价，底部「确定加入（N）」**一次性**写回 `PUR_DRAFT.lines` 再关闭。
+- 打开时用当前草稿预填已选项（`initPickFromDraft`），所以重复打开不会丢已填数量。
+- 带搜索（商品名/规格/条码）+ 全选/清空（作用域 = 当前筛选结果）。
+
+### 3. 页签顺序：开单 订单 采购 商品 客户 报表 我的欠款 设置
+
+- 网页 `public/index.html` 侧栏按钮重排；`visibleTabs()` 的过滤逻辑不动（按 perms 隐式过滤）。
+- 手机 `MainScreen.kt` 的 `enum class Tab` 重排（枚举顺序 = 显示顺序）。
+
+### 4. 顺手修的Bug
+
+- 🔴 网页 `puDraftModal` 提交时用 `querySelector('.pu-l-price')` 读进价，但 `.pu-l-price`是**外层 div**（input 是 `.pu-l-p`）
+  → 进价永远读到 `undefined` → 提交的单子进价全是 0。已改成 `.pu-l-p`。
+- 🔴 选商品网格所在的 `.modal` 默认 `max-width:420px`，只放得下 1 列（看着还是单列）→ 加 `.modal-wide{max-width:900px}`。
+
+### 5. 版本与验证
+
+- 手机版 v5.7.0 / versionCode **58**（v5.6.9 是 57）；网页端 `sw.js` CACHE **v58**。
+- Playwright 线上验证 **44 项断言全PASS / 0 FAIL**：侧栏顺序、双列/多列、勾选计数、
+  批量加入草稿、选商品多选不关弹窗、一次性确认回填数量、搜索筛选、375px 窄屏自适应、零 JS 错误。
+- 🔴 静态文件必须传到 `public/css/` `public/js/`；上传后 sha256 对账。
+- 🔴 `patch engine` 对 **>8KB 的 CRLF 锚点块匹配会失败**（报 ANCHOR MISS count=0）→ 大段替换改成「线上取回基线 → 本地合成 → put → 远端 cp → sha256 对账」。
+
+### 6. 涉及文件
+
+- 网页：`public/js/app.js`（`puSuggestions` / 新增 `puPickModal` / `puDraftModal` 一行）、
+  `public/css/style.css`（`.pu-grid` `.pu-cd` `.pu-bar4` `.modal-wide` `.pu-pk-*`）、`public/index.html`、`public/sw.js`
+- 手机：`ui/main/PurchaseScreen.kt`（`SuggestSection` → `SuggestCard` 网格、新增 `PickProductsDialog` / `PickCard`）、
+  `vm/PurchaseViewModel.kt`（`sugPicked`/`sugQty`/`pickList`/`pickSel`）、`ui/main/MainScreen.kt`（Tab 顺序）、`app/build.gradle`
+- 🔴 Kotlin 坑：`isPicked` 建议页和选商品各定义一个会 **Conflicting overloads**（JVM 签名只看得参数类型）→ 选商品那个叫 `isPickSel`。
+- 🔴 Kotlin 坑：`Math.round(Double)` 返回 **Long**，传给 `money(Double)` 要 `/100.0` 不能 `/100`。
+
+---
+
+## 2026-10-21 — v5.6.9：采购与库存（手机版同步，管家婆「以销定购」口径）
+
+经理需求：`添加采购及库存功能，全链路检查功能对接功能，不要影响现有功能及数据，然后更新网页及移动端` +
+`功能参考管家婆erp：1、采购量按已有订单数量为准，实现采购入库-销售单=库存0；2、手机端也同步做；3、记得做好后全链路排查`
+
+### 1. 核心口径（三端一致，手机/网页/服务端同一套公式）
+
+```
+建议采购量 = max(0, 净销售数量 - 已采购入库数量)
+  净销售数量 = SUM(order_items.qty)            （销售正、退货负，自动抵消）
+  已采购入库 = SUM(purchase_items.qty) WHERE purchases.status='received'
+推导库存 = 已入库 - 已销          账实差异 = 账面库存 - 推导库存（只呈现不自动改）
+```
+
+- ✅ 采购入库后推导库存 = 0，天然满足「采购入库 − 销售单 = 库存 0（不积压）」。
+- 🔴 **故意不依赖 `inventory.qty`**：账面库存有历史误差（老单被清零过），但采购建议必须准。
+- 🔴 手机端**只显示服务端给的 `suggest_qty`**，不重算 —— 三处算法必须唯一，否则经理会看到两个数字。
+
+### 2. 服务端新增 9 个端点（已上线）
+
+`GET/POST /api/suppliers`、`GET /api/purchase-suggestions`、`GET /api/inventory/summary`、
+`GET /api/stock-moves`、`GET/POST /api/purchases`、`GET/DELETE /api/purchases/:id`
+
+- 新增 4 张表：`suppliers` / `purchases` / `purchase_items` / `stock_moves`，与销售表**完全独立**，
+  采购数据不可能污染销售数据。
+- 采购单**建单即入库**（事务内加库存 + 写 `stock_moves`）；作废则回退库存并写 `purchase_void` 流水。
+- 🔴 库存流水**销售侧从 `order_items` 反推**，既有销售/退货/改单/删单的 7 处库存写入逻辑**一行未动**。
+
+### 3. 权限
+
+- manager/boss：`purchase.view` + `purchase.edit`；staff 只给 `inventory.view`（无采购，看不到进价）。
+- customer 全部 403（`need()` 拦截 + `isCustomer()` 兜底）。
+
+### 4. 顺带修一个既有 Bug：编辑商品会清零库存
+
+`PUT /api/products` 原本无条件执行 `UPDATE inventory SET qty=?`，而网页端编辑商品报文里**没有** `qty`，
+`Number(undefined)||0 = 0` → 每改一次商品名就把该商品库存清零。
+
+改为**报文显式带 qty/low_threshold 才写**，没带就保留原值。
+✅ 只阻止今后被清零，**不回改历史数据**。
+
+### 5. 涉及文件
+
+- 服务端：`server.js`（9 个端点 + perms + `genPurchaseNo` + Bug 修复）
+- 网页版：`public/js/app.js`、`public/css/style.css`、`public/index.html`、`public/sw.js`（CACHE v56→v57）
+- 手机版：`data/Models.kt`、`data/Api.kt`、`vm/PurchaseViewModel.kt`（新）、
+  `ui/main/PurchaseScreen.kt`（新）、`ui/main/MainScreen.kt`（新增「采购」Tab）
 
 ---
 
@@ -716,6 +974,18 @@ Dialog(
 | v5.5 | 44 | 信任设备三按钮（进入开单/换账号/选账套）+ 设置页账套切换 + 两端互跳 + 首页移动版下载 |
 | v5.5.1 | 45 | 修「存为图片」自动弹空预览 + 修 /downloads/apk 短链 404（二维码扫不出） |
 | v5.5.2 | 45 | 网页热修（无新APK）：修「管理打印模板」弹窗卡死 |
+| v5.5.3 | 45 | 网页热修（无新APK）：打印模板文字排版 + 打单前选模板崩溃 |
+| v5.6.5 | 53 | 客户下单角色 + 信任设备免密 |
+| v5.6.6 | 54 | 客户下单员支持多门店 + 修两处欠款口径 |
+| v5.6.7 | 55 | 客户自助单标识 + 客户折扣只读 + 门店入口卡片化 |
+| v5.6.8 | 56 | 编辑历史订单用明细快照，不被当前商品表覆盖 |
+| v5.6.9 | 57 | **采购与库存**（管家婆「以销定购」口径，手机版同步）|
+| v5.7.0 | 58 | 采购页 UI 改版：建议订单双列 + 商品页自适应多列多选 |
+| v5.7.1 | 59 | 采购建议操作条改右侧悬浮（网页）+ 底部常驻（手机）|
+| v5.7.2 | 60 | **加载速度优化**：静态直出 + HTTP/2 + R8 瘦身（APK 32MB→21.8MB）|
+
+> 📌 **v5.7.0 中途还追加过一次「库存重算」**：把账面库存刷成推导值
+> （= max(0, 已采购入库 − 已销售出库)），前后各备份一次。
 
 ---
 

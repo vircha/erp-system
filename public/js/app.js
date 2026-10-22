@@ -564,6 +564,8 @@ if (d.trust_full) {
       if (pg === 'customers' && !can('customer.view')) show = false;
       if (pg === 'products' && !can('product.view')) show = false;
       if (pg === 'analytics' && !can('analysis.view')) show = false;
+      // 🔴 采购页：经理/老板有 purchase.view 才显示；员工只有 inventory.view → 仍需能看库存
+      if (pg === 'purchase' && !can('purchase.view') && !can('inventory.view')) show = false;
       if (pg === 'sale' && !can('sale.create')) show = false;
       if (pg === 'admin' && !ME.isAdmin) show = false;                    // 管理页仅平台管理员
       if (pg === 'myar') show = (ME.role === 'customer');                 // 我的欠款：仅客户账号
@@ -605,6 +607,7 @@ if (d.trust_full) {
       else if (page === 'customers') await renderCustomers();
       else if (page === 'products') await renderProducts();
       else if (page === 'analytics') await renderAnalytics();
+      else if (page === 'purchase') await renderPurchase();
       else if (page === 'admin') await renderAdmin();
       else if (page === 'me') await renderMe();
     } catch (e) { $('#page').innerHTML = '<div class="err" style="padding:20px">' + esc(e.message) + '</div>'; }
@@ -688,6 +691,650 @@ if (d.trust_full) {
   function pctOf(v) { return (Number(v || 0) * 100).toFixed(1) + '%'; }
   function moneyOf(v) { return '¥' + Number(v || 0).toFixed(2); }
   function num2(v) { return Math.round(Number(v || 0) * 100) / 100; }
+
+
+  // ================= 采购与库存（2026-10-21；管家婆「以销定购」口径）=================
+  // 🔴 业务口径（经理 2026-10-21 明确）：
+  //    「采购量按已有订单数量为准，实现采购入库 - 销售单 = 库存 0（不积压）」
+  //    建议采购量 = max(0, 净销售数量 - 已采购入库数量)
+  //    ✅ 前端只负责展示与提交，口径全部由服务端算，前端不重算（避免两处口径打架）。
+  // 🔴 三口径含义（页面上必须标清楚，别让人误读）：
+  //    账面库存 = inventory.qty（历史上有被误清零的老账）
+  //    推导库存 = 已采购入库 - 已销售出库（按流水推出来的真实结余）
+  //    差异     = 账面 - 推导（历史误差，只呈现不自动改）
+  // ============================================================
+
+  let PUR = { tab: 'sug' };        // sug | list | inv | mv
+  const PUR_TABS = [
+    { k: 'sug', t: '采购建议', need: 'purchase.view' },
+    { k: 'list', t: '采购单', need: 'purchase.view' },
+    { k: 'inv', t: '库存明细', need: 'inventory.view' },
+    { k: 'mv', t: '库存流水', need: 'inventory.view' },
+  ];
+  // 采购单草稿（新建采购单用）
+  let PUR_DRAFT = { supplier_id: '', supplier_name: '', lines: [], remark: '' };
+
+  async function renderPurchase() {
+    if (!can('purchase.view') && !can('inventory.view')) {
+      $('#page').innerHTML = '<div class="card muted" style="padding:16px">无权限查看采购与库存</div>';
+      return;
+    }
+    const tabs = PUR_TABS.filter(t => !t.need || can(t.need));
+    if (!tabs.some(t => t.k === PUR.tab)) PUR.tab = tabs[0] ? tabs[0].k : 'sug';
+    $('#page').innerHTML = `
+      <div class="pu-tabs">
+        ${tabs.map(t => `<button class="pu-tab${t.k === PUR.tab ? ' active' : ''}" data-pu="${t.k}">${t.t}</button>`).join('')}
+      </div>
+      <div id="pu-body"><div class="muted" style="padding:20px;text-align:center">加载中…</div></div>`;
+    $$('#page [data-pu]').forEach(b => b.onclick = () => { PUR.tab = b.dataset.pu; renderPurchase(); });
+    const body = $('#pu-body');
+    try {
+      if (PUR.tab === 'sug') await puSuggestions(body);
+      else if (PUR.tab === 'list') await puList(body);
+      else if (PUR.tab === 'inv') await puInventory(body);
+      else if (PUR.tab === 'mv') await puMoves(body);
+    } catch (e) { body.innerHTML = '<div class="card err" style="padding:14px">' + esc(e.message || '加载失败') + '</div>'; }
+  }
+
+  // ---------- 选择商品弹窗（v5.6.10 改造：多列自适应网格 + 多选 + 填数量 + 一次性确认）----------
+  // 🔴 经理 2026-10-21 反馈：「可以多选产品并填写好数量再返回采购单，现在点一下就回去一下」
+  //    原来这里是**单列 .pu-mv 列表 + 点一下就 closeModal() 再重开草稿弹窗**，来回闪。
+  //    改法：在同一层弹窗内多列网格展示全部商品（可搜索），
+  //    每张卡片有勾选框 + 数量输入 + 进价，底部「确定加入（N）」**一次性**写回 PUR_DRAFT.lines。
+  //    卡片点击不关弹窗（除了点勾选框/数量框），所以可以连续勾很多个。
+  // 🔴 列数用 CSS grid repeat(auto-fill,minmax(190px,1fr))：宽屏自动 4~5 列、窄屏 2 列。
+  async function puPickModal(onDone) {
+    let prods = [];
+    try { prods = await API.req('GET', '/api/products'); } catch (e) { }
+    if (!Array.isArray(prods) || !prods.length) { toast('商品列表读取失败'); return; }
+    // 已选：Map(productId -> {qty, price})，初值取当前草稿已有行
+    const sel = new Map();
+    PUR_DRAFT.lines.forEach(l => sel.set(l.product_id, { qty: Number(l.qty) || 1, price: Number(l.price) || 0 }));
+    let kw = '';
+
+    const body = showModal('选择商品（可多选 · 可直接填数量）', `
+      <input id="pu-pk-kw" placeholder="输入商品名 / 规格 / 条码筛选…" autocomplete="off"/>
+      <div id="pu-pk-grid" class="pu-pk-grid"></div>
+      <div class="pu-pk-bar">
+        <span id="pu-pk-info" class="muted"></span>
+        <button class="btn-sm gray" id="pu-pk-all">全选</button>
+        <button class="btn-sm gray" id="pu-pk-none">清空</button>
+        <button class="btn-sm gray" id="pu-pk-cancel">取消</button>
+        <button class="btn-sm" id="pu-pk-ok">确定加入（<span id="pu-pk-n">${sel.size}</span>）</button>
+      </div>`);
+    if (!body) return;
+    // 🔴 选商品是多列网格，默认 .modal 只有 420px 宽 → 只放得下 1 列（看着还是单列）。
+    //    这里给弹窗加 .modal-wide 撑到 900px；关闭时 closeModal 会整体隐藏，下次不受影响。
+    const mEl = $('#modal-overlay .modal');
+    if (mEl) mEl.classList.add('modal-wide');
+
+    const grid = $('#pu-pk-grid');
+    const info = $('#pu-pk-info');
+    const cnt = $('#pu-pk-n');
+    const refreshCount = () => { if (cnt) cnt.textContent = String(sel.size); };
+
+    const draw = () => {
+      const key = kw.trim().toLowerCase();
+      const view = key ? prods.filter(p =>
+        String(p.name || '').toLowerCase().includes(key) ||
+        String(p.spec || '').toLowerCase().includes(key) ||
+        String(p.barcode || '').includes(key)) : prods;
+      if (info) info.textContent = '共 ' + view.length + ' 个商品' + (key ? '（已筛选）' : '');
+      if (!view.length) { grid.innerHTML = '<div class="muted" style="padding:14px;text-align:center">没有匹配的商品</div>'; return; }
+      grid.innerHTML = view.map(p => {
+        const s = sel.get(p.id);
+        return `
+        <div class="pu-pk-cd${s ? ' sel' : ''}" data-pk="${p.id}">
+          <div class="pu-pk-top">
+            <span class="pu-pk-ck">${s ? '☑' : '☐'}</span>
+            <span class="pu-pk-nm" title="${esc(p.name)}">${esc(p.name)}</span>
+          </div>
+          <div class="pu-pk-sp">${esc(p.spec || '')}${p.unit ? ' · ' + esc(p.unit) : ''}</div>
+          <div class="pu-pk-row">
+            <label><span>数量</span><input type="number" step="0.01" min="0" class="pu-pk-qty" data-pk="${p.id}" value="${s ? s.qty : ''}" placeholder="0"/></label>
+            <label><span>进价</span><input type="number" step="0.01" min="0" class="pu-pk-p" data-pk="${p.id}" value="${s ? s.price : (Number(p.cost) || 0)}"/></label>
+          </div>
+        </div>`;
+      }).join('');
+
+      // 点卡片（不在输入框上）→ 切换勾选
+      $$('#pu-pk-grid .pu-pk-cd').forEach(cd => {
+        cd.onclick = (ev) => {
+          if (ev.target && ev.target.closest('.pu-pk-row')) return;   // 点数量/进价输入框不切换
+          const id = Number(cd.dataset.pk);
+          const p = prods.find(x => Number(x.id) === id);
+          if (sel.has(id)) sel.delete(id);
+          else sel.set(id, { qty: 1, price: Number(p && p.cost) || 0 });
+          draw(); refreshCount();
+        };
+      });
+      // 数量 / 进价
+      $$('#pu-pk-grid .pu-pk-qty').forEach(inp => {
+        inp.oninput = () => {
+          const id = Number(inp.dataset.pk);
+          const p = prods.find(x => Number(x.id) === id);
+          const q = Number(inp.value) || 0;
+          const cur = sel.get(id) || { qty: 0, price: Number(p && p.cost) || 0 };
+          cur.qty = q;
+          if (q > 0) sel.set(id, cur); else sel.delete(id);
+          const cd = inp.closest('.pu-pk-cd');
+          if (cd) {
+            cd.classList.toggle('sel', sel.has(id));
+            const b = cd.querySelector('.pu-pk-ck'); if (b) b.textContent = sel.has(id) ? '☑' : '☐';
+          }
+          refreshCount();
+        };
+      });
+      $$('#pu-pk-grid .pu-pk-p').forEach(inp => {
+        inp.oninput = () => {
+          const id = Number(inp.dataset.pk);
+          const cur = sel.get(id);
+          if (cur) cur.price = Number(inp.value) || 0;
+        };
+      });
+    };
+    draw();
+    refreshCount();
+
+    const kwEl = $('#pu-pk-kw');
+    if (kwEl) kwEl.oninput = () => { kw = kwEl.value || ''; draw(); };
+    const bAll = $('#pu-pk-all');
+    if (bAll) bAll.onclick = () => {
+      $$('#pu-pk-grid .pu-pk-cd').forEach(cd => {
+        const id = Number(cd.dataset.pk);
+        const p = prods.find(x => Number(x.id) === id);
+        if (!p) return;
+        const cur = sel.get(id) || { qty: 1, price: Number(p.cost) || 0 };
+        if (!(cur.qty > 0)) cur.qty = 1;
+        sel.set(id, cur);
+      });
+      draw(); refreshCount();
+    };
+    const bNone = $('#pu-pk-none');
+    if (bNone) bNone.onclick = () => { sel.clear(); draw(); refreshCount(); };
+    const bCancel = $('#pu-pk-cancel');
+    if (bCancel) bCancel.onclick = () => { closeModal(); if (typeof onDone === 'function') onDone(); };
+    const bOk = $('#pu-pk-ok');
+    if (bOk) bOk.onclick = () => {
+      if (!sel.size) { toast('请至少勾选一个商品'); return; }
+      // 一次性写回草稿：已存在则覆盖数量/进价，新商品则push
+      sel.forEach((v, id) => {
+        if (!(Number(v.qty) > 0)) return;
+        const p = prods.find(x => Number(x.id) === id);
+        if (!p) return;
+        const ex = PUR_DRAFT.lines.find(l => l.product_id === id);
+        if (ex) { ex.qty = Number(v.qty) || 0; ex.price = Number(v.price) || 0; }
+        else PUR_DRAFT.lines.push({
+          product_id: id, name: p.name, spec: p.spec || '', unit: p.unit || '个',
+          qty: Number(v.qty) || 0, price: Number(v.price) || Number(p.cost) || 0
+        });
+      });
+      closeModal();
+      toast('已加入 ' + sel.size + ' 个商品');
+      if (typeof onDone === 'function') onDone();
+    };
+  }
+
+  // ---------- 采购建议（v5.6.10 改造：双列卡片 + 勾选批量加入；去掉每行「加入」按钮）----------
+  // 🔴 经理 2026-10-21 反馈两条：
+  //    ① 「采购首页的建议订单太占位置」→ 表格改双列自适应卡片网格（CSS grid，绝不用 column-count）。
+  //    ② 「建议订单里面的加入不知道有什么功能」→ **取消每行的「加入」按钮**，
+  //       改成「点卡片 = 勾选/取消 + 卡片内直接改数量 + 底部统一批量加入」，语义就明确了。
+  //🔴 PUR_PICKED / PUR_QTY 只存在于当前页内存（不落库）；真正的采购单草稿仍是 PUR_DRAFT.lines。
+  //    数量用 Map 存，不要从 DOM 反查（重绘会丢值）。
+  let PUR_PICKED = new Set();
+  let PUR_QTY = new Map();
+  // 🔴 2026-10-21 经理反馈「选好产品要滑到下面才能找到按钮」→ 4 个按钮改右侧浮动。
+  //    折叠状态放模块级，重画后仍保持经理手动收/展的选择。
+  let PUR_FLOAT_FOLD = false;
+
+  async function puSuggestions(body) {
+    body.innerHTML = '<div class="card"><div class="muted">加载中…</div></div>';
+    const rows = await API.req('GET', '/api/purchase-suggestions');
+    const list = Array.isArray(rows) ? rows : [];
+    const need = list.filter(r => Number(r.suggest_qty) > 0.005);
+    const sumSug = need.reduce((s, r) => s + Number(r.suggest_qty || 0), 0);
+    const sumAmt = need.reduce((s, r) => s + Number(r.suggest_qty || 0) * Number(r.cost || 0), 0);
+    const sumDiff = list.reduce((s, r) => s + Math.abs(Number(r.diff || 0)), 0);
+    const canEdit = can('purchase.edit');
+    const inDraft = (id) => PUR_DRAFT.lines.some(l => l.product_id === id);
+    body.innerHTML = `
+      <div class="card">
+        <div class="section-title">采购建议（以销定购）</div>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          建议采购量 = 已销售数量 − 已采购入库数量。全部采购入库后，库存正好回到 0（不积压）。<br>
+          点击卡片勾选，卡片里可直接改采购数量，最后统一「加入采购单」。
+        </div>
+        <div class="pu-stats">
+          <div class="pu-stat"><div class="k">需采购商品</div><div class="v">${need.length}</div></div>
+          <div class="pu-stat"><div class="k">建议采购总量</div><div class="v">${fmtQtyNum(sumSug)}</div></div>
+          <div class="pu-stat"><div class="k">按进价估算</div><div class="v">${fmt(sumAmt)}</div></div>
+          <div class="pu-stat"><div class="k">账面账实差异</div><div class="v pu-diff">${fmtQtyNum(sumDiff)}</div></div>
+        </div>
+        ${need.length ? `
+        <div class="pu-grid" id="pu-grid">
+          ${need.map(r => `
+            <div class="pu-cd${PUR_PICKED.has(r.id) ? ' sel' : ''}" data-pid="${r.id}">
+              <div class="pu-cd-nm" title="${esc(r.name)}">${esc(r.name)}</div>
+              ${r.spec ? `<div class="pu-cd-sp">${esc(r.spec)}</div>` : ''}
+              <div class="pu-cd-qty">建议 <b>${fmtQtyNum(r.suggest_qty)}</b> ${esc(r.unit || '')}</div>
+              <div class="pu-cd-meta">已销 ${fmtQtyNum(r.sold_qty)} · 已入库 ${fmtQtyNum(r.in_qty)} · 账面 ${fmtQtyNum(r.stock_qty)}</div>
+              <div class="pu-cd-foot">
+                <span>进价 ${fmt(r.cost)}</span>
+                <span class="pu-cd-amt">≈ ${fmt(Number(r.suggest_qty) * Number(r.cost || 0))}</span>
+              </div>
+              ${canEdit ? `<label class="pu-cd-in"><span>采购数量</span><input type="number" step="0.01" min="0" data-qty="${r.id}" value="${PUR_QTY.has(r.id) ? PUR_QTY.get(r.id) : r.suggest_qty}"/></label>` : ''}
+              ${inDraft(r.id) ? '<div class="pu-cd-badge">已在采购单</div>' : ''}
+              <div class="pu-cd-ck">${PUR_PICKED.has(r.id) ? '✓ 已选' : '点击勾选'}</div>
+            </div>`).join('')}
+        </div>
+        ${canEdit ? `
+        <div class="pu-float${PUR_FLOAT_FOLD ? ' fold' : ''}" id="pu-float">
+          <button class="pu-fb-main" id="pu-sel-add" title="把勾选的商品写入采购单草稿">
+            <span>加入采购单</span>
+            <span class="pu-fb-n">已选 <b id="pu-pick-n">${PUR_PICKED.size}</b></span>
+          </button>
+          <div class="pu-fb-sub">
+            <button class="pu-fb-b gray" id="pu-sel-all" title="勾选全部建议商品">全选</button>
+            <button class="pu-fb-b gray" id="pu-sel-cost" title="按商品进价估算这批要多少钱">估算</button>
+            <button class="pu-fb-b gray" id="pu-sel-none" title="清空所有勾选">清空</button>
+          </div>
+          <button class="pu-fb-fold" id="pu-float-fold" title="收起/展开">${PUR_FLOAT_FOLD ? '‹' : '›'}</button>
+        </div>` : ''}`
+        : '<div class="muted" style="padding:16px;text-align:center">当前没有需要采购的商品（销售量都已被采购覆盖）</div>'}
+      </div>
+      <div id="pu-draft-slot"></div>
+      <div class="card">
+        <div class="section-title">全部商品库存对照</div>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          账面库存 = 系统记录的结余；推导库存 = 已入库 − 已销。差异是历史遗留误差，暂不自动改。
+        </div>
+        <div class="table-wrap">
+        <table class="pu-tbl">
+          <thead><tr>
+            <th>商品</th><th class="num">账面</th><th class="num">已销</th><th class="num">已入库</th>
+            <th class="num">推导</th><th class="num">差异</th><th class="num">建议采购</th>
+          </tr></thead>
+          <tbody>${list.map(r => `
+            <tr>
+              <td class="nm" title="${esc(r.name)}">${esc(r.name)}</td>
+              <td class="num${Number(r.stock_qty) < 0 ? ' pu-neg' : ''}">${fmtQtyNum(r.stock_qty)}</td>
+              <td class="num">${fmtQtyNum(r.sold_qty)}</td>
+              <td class="num">${fmtQtyNum(r.in_qty)}</td>
+              <td class="num">${fmtQtyNum(r.derive_qty)}</td>
+              <td class="num${Math.abs(Number(r.diff)) > 0.005 ? ' pu-diff' : ''}">${fmtQtyNum(r.diff)}</td>
+              <td class="num${Number(r.suggest_qty) > 0.005 ? ' pu-sug' : ''}">${fmtQtyNum(r.suggest_qty)}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>
+      </div>`;
+
+    // ---- 草稿条 ----
+    const drawDraft = () => {
+      const slot = $('#pu-draft-slot');
+      if (!slot) return;
+      if (!PUR_DRAFT.lines.length) { slot.innerHTML = ''; return; }
+      const n = PUR_DRAFT.lines.length;
+      const qty = PUR_DRAFT.lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+      const amt = PUR_DRAFT.lines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.price) || 0), 0);
+      slot.innerHTML = `
+        <div class="pu-draft">
+          <div class="d-t">采购单草稿：${n} 个商品 · ${fmtQtyNum(qty)} 件 · ${fmt(amt)}</div>
+          <button class="d-b" id="pu-go-draft">去建采购单</button>
+        </div>`;
+      const go = $('#pu-go-draft');
+      if (go) go.onclick = () => puDraftModal();
+    };
+    drawDraft();
+
+    const refreshCount = () => { const el = $('#pu-pick-n'); if (el) el.textContent = String(PUR_PICKED.size); };
+    const markCd = (cd, on) => {
+      cd.classList.toggle('sel', on);
+      const ck = cd.querySelector('.pu-cd-ck');
+      if (ck) ck.textContent = on ? '✓ 已选' : '点击勾选';
+    };
+
+    // ---- 点卡片 = 勾选/取消 ----
+    $$('#pu-grid .pu-cd').forEach(cd => {
+      cd.onclick = (ev) => {
+        if (ev.target && ev.target.closest('.pu-cd-in')) return;   // 点数量输入框不切换勾选
+        const id = Number(cd.dataset.pid);
+        if (PUR_PICKED.has(id)) PUR_PICKED.delete(id); else PUR_PICKED.add(id);
+        markCd(cd, PUR_PICKED.has(id));
+        refreshCount();
+      };
+    });
+    // ---- 数量输入（oninput 只写 Map，不重绘，避免丢焦点）----
+    $$('#pu-grid [data-qty]').forEach(inp => {
+      inp.oninput = () => {
+        const id = Number(inp.dataset.qty);
+        PUR_QTY.set(id, inp.value);
+        const cd = inp.closest('.pu-cd');
+        if (cd) markCd(cd, true);
+        PUR_PICKED.add(id);
+        refreshCount();
+      };
+    });
+
+    // ---- 折叠/展开（经理手动收起来时不挡卡片）----
+    const btnFold = $('#pu-float-fold');
+    const fl = $('#pu-float');
+    if (btnFold && fl) btnFold.onclick = (ev) => {
+      ev.stopPropagation();          // 🔴 别让它冒泡去点卡片
+      PUR_FLOAT_FOLD = !PUR_FLOAT_FOLD;
+      fl.classList.toggle('fold', PUR_FLOAT_FOLD);
+      btnFold.textContent = PUR_FLOAT_FOLD ? '‹' : '›';
+    };
+
+    const btnNone = $('#pu-sel-none');
+    if (btnNone) btnNone.onclick = () => {
+      PUR_PICKED.clear();
+      $$('#pu-grid .pu-cd').forEach(cd => markCd(cd, false));
+      refreshCount(); toast('已清空勾选');
+    };
+    const btnAll = $('#pu-sel-all');
+    if (btnAll) btnAll.onclick = () => {
+      need.forEach(r => PUR_PICKED.add(r.id));
+      $$('#pu-grid .pu-cd').forEach(cd => markCd(cd, true));
+      refreshCount(); toast('已勾选 ' + need.length + ' 个商品');
+    };
+    const btnCost = $('#pu-sel-cost');
+    if (btnCost) btnCost.onclick = () => {
+      const t = need.reduce((s, r) => s + Number(r.suggest_qty) * Number(r.cost || 0), 0);
+      toast('按进价估算合计 ' + fmt(t));
+    };
+    const btnAdd = $('#pu-sel-add');
+    if (btnAdd) btnAdd.onclick = async () => {   // 🔴 这里必须 async：末尾要 await renderPurchase()
+      if (!PUR_PICKED.size) { toast('请先点击卡片勾选商品'); return; }
+      let n = 0, bad = 0;
+      PUR_PICKED.forEach(id => {
+        const r = need.find(x => Number(x.id) === id);
+        if (!r) return;
+        const q = PUR_QTY.has(id) ? (Number(PUR_QTY.get(id)) || 0) : (Number(r.suggest_qty) || 0);
+        if (q <= 0) { bad++; return; }
+        const ex = PUR_DRAFT.lines.find(l => l.product_id === id);
+        if (ex) { ex.qty = q; ex.price = Number(r.cost) || 0; }
+        else PUR_DRAFT.lines.push({
+          product_id: r.id, name: r.name, spec: r.spec || '', unit: r.unit || '个',
+          qty: q, price: Number(r.cost) || 0
+        });
+        n++;
+      });
+      PUR_PICKED.clear();
+      if (bad) toast(bad + ' 个商品数量为 0，已跳过');
+      if (n) toast('已加入 ' + n + ' 个商品到采购单草稿');
+      await renderPurchase();     // 重画：更新「已在采购单」标记
+    };
+  }
+  // ---------- 采购单列表 ----------
+  async function puList(body) {
+    body.innerHTML = '<div class="card"><div class="muted">加载中…</div></div>';
+    const rows = await API.req('GET', '/api/purchases');
+    const list = Array.isArray(rows) ? rows : [];
+    const canEdit = can('purchase.edit');
+    body.innerHTML = `
+      <div class="card">
+        <div class="section-title">采购单</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0">
+          ${canEdit ? '<button class="btn-sm" id="pu-new">＋ 新建采购单</button>' : ''}
+          <span class="muted" style="font-size:12px">建单即入库：提交后库存立即增加，作废则自动回退。</span>
+        </div>
+        ${list.length ? `
+        <div class="table-wrap">
+        <table class="pu-tbl">
+          <thead><tr>
+            <th>单号</th><th>日期</th><th>供应商</th><th class="num">明细</th>
+            <th class="num">金额</th><th>状态</th><th>操作</th>
+          </tr></thead>
+          <tbody>${list.map(p => `
+            <tr>
+              <td>${esc(p.purchase_no || '')}</td>
+              <td>${esc(p.purchase_date || '')}</td>
+              <td class="nm" title="${esc(p.supplier_name || '')}">${esc(p.supplier_name || '-')}</td>
+              <td class="num">${p.item_count || 0}</td>
+              <td class="num">${fmt(p.payable)}</td>
+              <td>${p.status === 'void' ? '<span class="pu-tag void">已作废</span>' : '<span class="pu-tag in">已入库</span>'}</td>
+              <td>
+                <button class="btn-sm gray" data-view="${p.id}">明细</button>
+                ${canEdit && p.status !== 'void' ? ` <button class="btn-sm danger" data-void="${p.id}">作废</button>` : ''}
+              </td>
+            </tr>`).join('')}</tbody>
+        </table></div>` : '<div class="muted" style="padding:16px;text-align:center">还没有采购单</div>'}
+      </div>`;
+    if ($('#pu-new')) $('#pu-new').onclick = () => puNewOrder();
+    $$('#pu-body [data-view]').forEach(b => b.onclick = () => puViewOrder(b.dataset.view));
+    $$('#pu-body [data-void]').forEach(b => b.onclick = () => puVoidOrder(b.dataset.void));
+  }
+
+  async function puViewOrder(id) {
+    let d;
+    try { d = await API.req('GET', '/api/purchases/' + id); }
+    catch (e) { toast(e.message); return; }
+    showModal('采购单 ' + (d.purchase_no || ''), `
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        日期 ${esc(d.purchase_date || '')} · 供应商 ${esc(d.supplier_name || '-')} ·
+        ${d.status === 'void' ? '<span class="pu-tag void">已作废</span>' : '<span class="pu-tag in">已入库</span>'}
+      </div>
+      <table class="pu-tbl">
+        <thead><tr><th>商品</th><th class="num">数量</th><th class="num">进价</th><th class="num">小计</th></tr></thead>
+        <tbody>${(d.items || []).map(i => `
+          <tr>
+            <td class="nm" title="${esc(i.product_name || '')}">${esc(i.product_name || '')}</td>
+            <td class="num">${fmtQtyNum(i.qty)} ${esc(i.unit || '')}</td>
+            <td class="num">${fmt(i.price)}</td>
+            <td class="num">${fmt(i.subtotal)}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+      <div style="text-align:right;margin-top:10px;font-weight:700">合计 ${fmt(d.payable)}</div>
+      ${d.remark ? '<div class="muted" style="font-size:12px;margin-top:6px">备注：' + esc(d.remark) + '</div>' : ''}
+      <button class="btn-primary" id="pu-view-close" style="margin-top:14px">关闭</button>`);
+    const c = $('#pu-view-close');
+    if (c) c.onclick = closeModal;
+  }
+
+  async function puVoidOrder(id) {
+    if (!confirm('作废该采购单？库存会自动回退（相当于没采购过）。')) return;
+    try { await API.req('DELETE', '/api/purchases/' + id); toast('已作废，库存已回退'); }
+    catch (e) { toast(e.message); }
+    await renderPurchase();
+  }
+
+  // ---------- 新建采购单 ----------
+  function puNewOrder() {
+    PUR_DRAFT = { supplier_id: '', supplier_name: '', lines: [], remark: '' };
+    puDraftModal();
+  }
+  async function puDraftModal() {
+    // 供应商下拉
+    let sups = [];
+    try { sups = await API.req('GET', '/api/suppliers'); } catch (e) { }
+    if (!Array.isArray(sups)) sups = [];
+    const body = showModal('新建采购单', `
+      <label>供应商</label>
+      <select id="pu-sup">
+        <option value="">（不指定）</option>
+        ${sups.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}
+      </select>
+      <input id="pu-sup-new" placeholder="或直接输入供应商名称" style="margin-top:6px"/>
+      <label style="margin-top:10px">采购明细</label>
+      <div id="pu-lines"></div>
+      <button class="btn-sm gray" id="pu-addrow" style="width:100%;margin-top:8px">＋ 添加商品</button>
+      <label style="margin-top:10px">备注</label>
+      <input id="pu-remark" placeholder="选填"/>
+      <div class="pu-bar">
+        <button class="btn-sm gray" id="pu-cancel">取消</button>
+        <button class="btn-sm gray" id="pu-save-draft">保存草稿</button>
+        <button class="btn-sm" id="pu-submit">提交并入库</button>
+      </div>`);
+    if (!body) return;
+    const drawLines = () => {
+      const box = $('#pu-lines');
+      if (!box) return;
+      if (!PUR_DRAFT.lines.length) {
+        box.innerHTML = '<div class="muted" style="font-size:12px;padding:8px 0">还没有明细，可从「采购建议」页加入，或点上方添加商品。</div>';
+        return;
+      }
+      box.innerHTML = PUR_DRAFT.lines.map((l, i) => `
+        <div class="pu-line" data-idx="${i}">
+          <div>
+            <span class="t">${esc(l.name || '')}</span>
+            <input class="pu-l-name" value="${esc(l.name || '')}" placeholder="商品名"/>
+          </div>
+          <div><span class="t">数量</span><input class="pu-l-qty" type="number" step="0.01" min="0" value="${l.qty}"/></div>
+          <div class="pu-l-price"><span class="t">进价</span><input class="pu-l-p" type="number" step="0.01" min="0" value="${l.price}"/></div>
+          <div><span class="t">小计</span><div class="pu-l-sum" style="font-weight:600;padding:8px 0"></div></div>
+          <button class="btn-sm gray pu-l-del" type="button" style="width:34px;padding:8px 0">✕</button>
+        </div>`).join('');
+      const recalc = () => {
+        $$('#pu-lines .pu-line').forEach(row => {
+          const i = Number(row.dataset.idx);
+          const q = Number(row.querySelector('.pu-l-qty').value) || 0;
+          const p = Number(row.querySelector('.pu-l-p').value) || 0;
+          row.querySelector('.pu-l-sum').textContent = fmt(q * p);
+        });
+      };
+      $$('#pu-lines .pu-l-qty, #pu-lines .pu-l-p').forEach(inp => inp.oninput = recalc);
+      $$('#pu-lines .pu-l-name').forEach(inp => inp.oninput = () => {
+        PUR_DRAFT.lines[Number(inp.closest('.pu-line').dataset.idx)].name = inp.value;
+      });
+      $$('#pu-lines .pu-l-del').forEach(b => b.onclick = () => {
+        PUR_DRAFT.lines.splice(Number(b.closest('.pu-line').dataset.idx), 1);
+        drawLines();
+      });
+      recalc();
+    };
+    drawLines();
+    if ($('#pu-addrow')) $('#pu-addrow').onclick = () => puPickModal(() => puDraftModal());
+
+    const sup = $('#pu-sup');
+    if (sup) sup.onchange = () => { const s = sups.find(x => String(x.id) === sup.value); PUR_DRAFT.supplier_id = sup.value || ''; PUR_DRAFT.supplier_name = s ? s.name : ''; };
+    const cancel = $('#pu-cancel');
+    if (cancel) cancel.onclick = closeModal;
+    const saveDraft = $('#pu-save-draft');
+    if (saveDraft) saveDraft.onclick = () => { PUR_DRAFT.remark = ($('#pu-remark') || {}).value || ''; toast('草稿已保存（本次会话内）'); closeModal(); };
+    const sub = $('#pu-submit');
+    if (sub) sub.onclick = async () => {
+      // 收集行数据
+      const lines = [];
+      const rows = $$('#pu-lines .pu-line');
+      for (const row of rows) {
+        const q = Number(row.querySelector('.pu-l-qty').value) || 0;
+        const p = Number(row.querySelector('.pu-l-p').value) || 0;
+        if (q <= 0) { toast('数量必须大于 0'); return; }
+        const i = Number(row.dataset.idx);
+        const l = PUR_DRAFT.lines[i];
+        if (!l) continue;
+        lines.push({ product_id: l.product_id, qty: q, price: p });
+      }
+      if (!lines.length) { toast('请先添加采购明细'); return; }
+      const supNew = ($('#pu-sup-new') || {}).value || '';
+      const supSel = $('#pu-sup') ? $('#pu-sup') : null;
+      const sid = supSel && supSel.value ? Number(supSel.value) : null;
+      const sname = supNew.trim() || (sid ? (sups.find(x => x.id === sid) || {}).name || '' : '');
+      sub.disabled = true;
+      try {
+        const r = await API.req('POST', '/api/purchases', {
+          supplier_id: sid, supplier_name: sname,
+          remark: ($('#pu-remark') || {}).value || '',
+          items: lines
+        });
+        closeModal();
+        toast('采购单 ' + (r.purchase_no || '') + ' 已入库');
+        PUR_DRAFT = { supplier_id: '', supplier_name: '', lines: [], remark: '' };
+        await renderPurchase();
+      } catch (e) { toast(e.message); sub.disabled = false; }
+    };
+  }
+
+  // ---------- 库存明细 ----------
+  async function puInventory(body) {
+    body.innerHTML = '<div class="card"><div class="muted">加载中…</div></div>';
+    const only = PUR.invOnly || '';
+    const kw = PUR.invKw || '';
+    let q = '';
+    if (only) q += 'only=' + encodeURIComponent(only);
+    if (kw) q += (q ? '&' : '') + 'kw=' + encodeURIComponent(kw);
+    const rows = await API.req('GET', '/api/inventory/summary' + (q ? '?' + q : ''));
+    const list = Array.isArray(rows) ? rows : [];
+    const neg = list.filter(r => Number(r.stock_qty) < 0).length;
+    const diff = list.filter(r => Math.abs(Number(r.diff)) > 0.005).length;
+    const alert = list.filter(r => Number(r.low_threshold) > 0 && Number(r.stock_qty) <= Number(r.low_threshold)).length;
+    body.innerHTML = `
+      <div class="card">
+        <div class="section-title">库存明细</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;margin:8px 0;align-items:center">
+          <input id="pu-inv-kw" placeholder="商品名 / 条码" value="${esc(kw)}" style="flex:1;min-width:140px;max-width:240px"/>
+          <button class="btn-sm" id="pu-inv-search">搜索</button>
+          <button class="btn-sm gray" id="pu-inv-all">全部</button>
+          <button class="btn-sm gray" id="pu-inv-neg">负库存</button>
+          <button class="btn-sm gray" id="pu-inv-diff">有差异</button>
+          <button class="btn-sm gray" id="pu-inv-alert">低于预警</button>
+        </div>
+        <div class="pu-stats">
+          <div class="pu-stat"><div class="k">商品数</div><div class="v">${list.length}</div></div>
+          <div class="pu-stat"><div class="k">负库存</div><div class="v${neg ? ' pu-neg' : ''}">${neg}</div></div>
+          <div class="pu-stat"><div class="k">账实差异</div><div class="v pu-diff">${diff}</div></div>
+          <div class="pu-stat"><div class="k">低于预警</div><div class="v${alert ? ' pu-neg' : ''}">${alert}</div></div>
+        </div>
+        <div class="table-wrap">
+        <table class="pu-tbl">
+          <thead><tr>
+            <th>商品</th><th class="num">账面库存</th><th class="num">已销</th><th class="num">已入库</th>
+            <th class="num">推导库存</th><th class="num">差异</th><th class="num">预警值</th>
+          </tr></thead>
+          <tbody>${list.map(r => `
+            <tr>
+              <td class="nm" title="${esc(r.name)}">${esc(r.name)}</td>
+              <td class="num${Number(r.stock_qty) < 0 ? ' pu-neg' : ''}">${fmtQtyNum(r.stock_qty)}</td>
+              <td class="num">${fmtQtyNum(r.sold_qty)}</td>
+              <td class="num">${fmtQtyNum(r.in_qty)}</td>
+              <td class="num">${fmtQtyNum(r.derive_qty)}</td>
+              <td class="num${Math.abs(Number(r.diff)) > 0.005 ? ' pu-diff' : ''}">${fmtQtyNum(r.diff)}</td>
+              <td class="num">${Number(r.low_threshold) ? fmtQtyNum(r.low_threshold) : '-'}</td>
+            </tr>`).join('')}</tbody>
+        </table></div>
+      </div>`;
+    const kwEl = $('#pu-inv-kw');
+    if (kwEl) kwEl.onkeydown = (e) => { if (e.key === 'Enter') { PUR.invKw = kwEl.value.trim(); puInventory($('#pu-body')); } };
+    const sb = $('#pu-inv-search');
+    if (sb) sb.onclick = () => { PUR.invKw = kwEl.value.trim(); puInventory($('#pu-body')); };
+    const bind = (id, v) => { const b = $('#' + id); if (b) b.onclick = () => { PUR.invOnly = v; puInventory($('#pu-body')); }; };
+    bind('pu-inv-all', '');
+    bind('pu-inv-neg', 'neg');
+    bind('pu-inv-diff', 'diff');
+    bind('pu-inv-alert', 'alert');
+  }
+
+  // ---------- 库存流水 ----------
+  async function puMoves(body) {
+    body.innerHTML = '<div class="card"><div class="muted">加载中…</div></div>';
+    const rows = await API.req('GET', '/api/stock-moves');
+    const list = Array.isArray(rows) ? rows : [];
+    const T = {
+      purchase_in: ['采购入库', 'in'],
+      purchase_void: ['采购作废回退', 'out'],
+      sale_out: ['销售出库', 'out'],
+      sale_return: ['销售退货入库', 'in'],
+    };
+    body.innerHTML = `
+      <div class="card">
+        <div class="section-title">库存流水</div>
+        <div class="muted" style="font-size:12px;margin-bottom:8px">
+          采购入库来自采购单；销售出库/退货由销售单明细反推（销售单不改，改单与退货自动体现在这里）。
+        </div>
+        ${list.length ? list.map(r => {
+      const t = T[r.move_type] || [r.move_type, ''];
+      const q = Number(r.qty) || 0;
+      return `
+          <div class="pu-mv">
+            <span class="t">${esc(r.ts || '')}</span>
+            <span class="pu-tag ${t[1]}">${t[0]}</span>
+            <span class="n" title="${esc(r.product_name || '')}">${esc(r.product_name || '')}</span>
+            <span class="q ${q >= 0 ? 'in' : 'out'}">${q >= 0 ? '+' : ''}${fmtQtyNum(q)}</span>
+            <span class="t">${esc(r.ref_no || '')}</span>
+          </div>`;
+    }).join('') : '<div class="muted" style="padding:16px;text-align:center">暂无流水</div>'}
+      </div>`;
+  }
 
   // ========== 报表中心（2026-10-17，方案 C：销售 / 货款 / 库存 三组） ==========
   // 🔴 为什么用「一个菜单 + 内部分组」而不是侧栏拆多项：报表会越来越多（商品/门店/账龄/预警），
@@ -962,11 +1609,24 @@ if (d.trust_full) {
     } catch (e) { toast('导出失败'); }
   }
 
+  // 今天的 YYYY-MM-DD（与 <input type="date"> 的 value 同格式）
+  function todayISO() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
   // ---------- 开单 ----------
   let custPrice = {};        // 当前门店的历史价：{product_id: price}
   let custItemDisc = {};     // 当前门店的单品折扣历史：{product_id: discount}（1 = 不打折）
   let custDiscount = 1;      // 当前门店上次整单折扣
   let custHasHistory = false;
+  // 🔴 2026-10-19 经理：「客户不会记得所有产品」→ 商品区默认只显示 8 个太少了。
+  //   这里记「是否已展开全部」。收起时优先展示该门店**历史下单过的商品**
+  //   （客户开单八成就是重复买那几样，摆在最前面根本不用翻）。
+  let saleAllOpen = false;
+  // 🔴 2026-10-20 经理：「选择商品的界面太小了」→ 全量商品挪进弹窗，行内只留常用的前 8 项。
+  //   弹窗内是**双列**网格（一个滚动容器包两列 → 天然同步滚动，不用写 JS 对齐 scrollTop）。
+  let prodPickKw = '';
 
   // 🔴 2026-10-19 客户多门店：商品价按「当前选中门店」取，所以这里必须带 customer_id。
 //    不带的话客户切了门店，加进购物车的还是**默认门店**的价格 —— 看着能下单，钱算错了。
@@ -994,6 +1654,49 @@ if (d.trust_full) {
   function discOf(it) {
     const d = Number(it.discount);
     return (isFinite(d) && d > 0) ? Math.min(1, Math.max(0.1, d)) : 1;
+  }
+
+  // ---------- 门店切换弹窗（2026-10-19 重做） ----------
+  // 🔴🔴 原实现两个问题：
+  //   ① 列表用 class="search-item"，但 style.css 里**根本没有这个 class**（grep 计数 0）
+  //      → 渲染成裸文本行，一眼看不出这是可选的列表；
+  //   ② 选中态靠店名前拼一个 '✅ ' emoji，字形在不同系统不一致、也不够醒目。
+  // 现在换成真正的卡片：整块可点、当前项主色描边 + 右上角「当前」pill。
+  // 提到模块作用域是为了让顶部入口卡片（#sale-store-card）直接绑定它 —— 入口本身就是它。
+  async function openStoreSwitch() {
+    const mine = allCustomers.filter(c => (ME.customerIds || []).map(Number).indexOf(Number(c.id)) >= 0);
+    if (!mine.length) { toast('账号没有绑定门店'); return; }
+    const cur = Number(saleState.customer_id);
+    showModal('选择下单门店', `
+      <div class="muted" style="font-size:12px;margin-bottom:10px">
+        切换后，商品价格会按<b>该门店的历史送货价</b>重新带出。
+      </div>
+      <div class="store-switch-list">
+        ${mine.map(c => {
+          const on = Number(c.id) === cur;
+          return `<div class="store-switch-item${on ? ' is-cur' : ''}" data-store="${c.id}" role="button" tabindex="0">
+            <span class="store-switch-ico" aria-hidden="true">🏪</span>
+            <span class="store-switch-name">${esc(c.name)}</span>
+            ${on ? '<span class="store-switch-pill">当前</span>' : '<span class="store-switch-go">选择 ›</span>'}
+          </div>`;
+        }).join('')}
+      </div>`);
+    const pick = async el => {
+      const id = Number(el.dataset.store);
+      if (id === cur) { closeModal(); return; }
+      if (saleState.items.length && !confirm('切换门店会清空已录入的商品（价格要按新店重算），继续？')) return;
+      sessionStorage.setItem('sale_store', String(id));
+      saleState.customer_id = id;
+      const c = allCustomers.find(x => Number(x.id) === id);
+      saleState.customer_name = c ? c.name : '';
+      saleState.items = [];
+      closeModal();
+      renderSale();          // 重走一遍：ensureSaleData 会带 customer_id 重取商品价
+    };
+    document.querySelectorAll('[data-store]').forEach(el => {
+      el.onclick = () => pick(el);
+      el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(el); } };
+    });
   }
 
   async function loadCustPrices(customerId) {
@@ -1065,14 +1768,22 @@ if (d.trust_full) {
         <div class="card sale-top-cell">
           <label>客户 / 门店</label>
           ${isCust
-            ? `<div class="row between" style="gap:8px;align-items:center">
-                 <div style="padding:8px 0;font-weight:600">${esc(saleState.customer_name || '—')}</div>
-                 ${(ME.customerIds || []).length > 1
-                   // 🔴 2026-10-19 负责多家门店 → 给一个切换按钮；只有一家就直接锁死不给入口
-                   ? `<button class="btn-sm gray" id="sale-switch-store" style="flex:0 0 auto;white-space:nowrap">🏪 切换门店</button>`
-                   : ''}
-               </div>
-               <div class="muted" style="font-size:12px">价格按<b>当前门店的历史送货价</b>带出</div>`
+            ? (() => {
+              // 🔴🔴 2026-10-19 经理两次反馈「就这样看下去 我都不知道原来门店可以选择的」。
+              //   根因不是弹窗里的列表不好看，而是**顶部入口本身**是个灰底小按钮，
+              //   长得跟旁边一堆说明文字一样，完全看不出这里能点。
+              //   现在整块做成可点击的门店卡：店名大、当前状态明确、右侧显眼切换提示。
+              const _multi = (ME.customerIds || []).length > 1;
+              return `<div id="sale-store-card" class="store-now${_multi ? ' is-clickable' : ''}"${_multi ? ' role="button" tabindex="0" title="点击切换下单门店"' : ''}>
+                  <span class="store-now-ico" aria-hidden="true">🏪</span>
+                  <span class="store-now-main">
+                    <span class="store-now-cap">当前下单门店</span>
+                    <span class="store-now-name">${esc(saleState.customer_name || '—')}</span>
+                  </span>
+                  ${_multi ? '<span class="store-now-act">切换<span class="store-now-arrow">›</span></span>' : '<span class="store-now-lock">已锁定</span>'}
+                </div>
+                <div class="muted" style="font-size:12px;margin-top:6px">价格按<b>当前门店的历史送货价</b>带出${_multi ? '；点上方卡片可换门店' : ''}</div>`;
+            })()
             : `<select id="sale-customer">
             <option value="">— 请选择 —</option>
             ${allCustomers.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
@@ -1081,8 +1792,8 @@ if (d.trust_full) {
         </div>
         <div class="card sale-top-cell">
           <label>下单日期</label>
-          <input type="date" id="sale-date"/>
-          <div class="muted" style="font-size:12px;margin-top:6px">批量表格开单按此日期生成订单</div>
+          <input type="date" id="sale-date"${isCust ? ' readonly title="客户下单日期固定为当天，不能修改"' : ''}/>
+          <div class="muted" style="font-size:12px;margin-top:6px">${isCust ? '客户下单日期<b>固定为当天</b>，不能修改' : '批量表格开单按此日期生成订单'}</div>
         </div>
         <div class="card sale-top-cell${isCust ? ' hidden' : ''}">
           <div class="row between" style="align-items:center">
@@ -1126,8 +1837,8 @@ if (d.trust_full) {
       </div>
       <div class="sale-total"><span>${isReturnMode() ? '应退合计' : '合计'}</span><span class="amt" id="sale-amt">¥0.00</span></div>
       <div class="card" style="margin-top:10px">
-        <label>整单折扣（0.1 - 1，1 = 不打折）<span class="muted" style="font-weight:400"> · 额外全单让利，单品折扣已含在每行小计里，两者会叠乘</span></label>
-        <input id="sale-discount" type="number" min="0.1" max="1" step="0.01" value="1"/>
+        <label>整单折扣（0.1 - 1，1 = 不打折）<span class="muted" style="font-weight:400">${isCust ? ' · <b style="color:var(--primary)">折扣由商家定，你不能修改</b>' : ' · 额外全单让利，单品折扣已含在每行小计里，两者会叠乘'}</span></label>
+        <input id="sale-discount" type="number" min="0.1" max="1" step="0.01" value="1"${isCust ? ' readonly title="折扣由商家定，客户不能修改"' : ''}/>
         <div id="sale-disc-sum" class="muted" style="display:none;font-size:12px;margin-top:6px;color:#f5a524"></div>
         <div class="row between" style="margin-top:10px"><span>${isReturnMode() ? '折后应退' : '折后应付'}</span><span id="sale-pay" style="color:var(--danger);font-weight:700">¥0.00</span></div>
       </div>
@@ -1145,34 +1856,12 @@ if (d.trust_full) {
     // 🔴 客户模式下 select 根本不渲染 → 直接赋值 onchange 会 TypeError 并打断后面所有绑定
     const custSel = $('#sale-customer');
     // 客户多门店：切换门店 = 换默认门店 + 重载该店价格 + 重载该店商品价
-    const swBtn = $('#sale-switch-store');
-    if (swBtn) swBtn.onclick = async () => {
-      const mine = allCustomers.filter(c => (ME.customerIds || []).map(Number).indexOf(Number(c.id)) >= 0);
-      if (!mine.length) { toast('账号没有绑定门店'); return; }
-      const cur = Number(saleState.customer_id);
-      showModal('选择下单门店', `
-        <div class="muted" style="font-size:12px;margin-bottom:10px">
-          切换后，商品价格会按<b>该门店的历史送货价</b>重新带出。
-        </div>
-        <div class="search-result">
-          ${mine.map(c => `
-            <div class="search-item" data-store="${c.id}" style="display:flex;justify-content:space-between;align-items:center">
-              <span>${Number(c.id) === cur ? '✅ ' : ''}${esc(c.name)}</span>
-            </div>`).join('')}
-        </div>`);
-      document.querySelectorAll('[data-store]').forEach(el => el.onclick = async () => {
-        const id = Number(el.dataset.store);
-        if (id === cur) { closeModal(); return; }
-        if (saleState.items.length && !confirm('切换门店会清空已录入的商品（价格要按新店重算），继续？')) return;
-        sessionStorage.setItem('sale_store', String(id));
-        saleState.customer_id = id;
-        const c = allCustomers.find(x => Number(x.id) === id);
-        saleState.customer_name = c ? c.name : '';
-        saleState.items = [];
-        closeModal();
-        renderSale();          // 重走一遍：ensureSaleData 会带 customer_id 重取商品价
-      });
-    };
+    // 🔴 门店入口卡片绑定打开选择弹窗（可点击时才绑，单店锁定态不给任何点击反馈）
+    const swBtn = $('#sale-store-card');
+    if (swBtn && swBtn.classList.contains('is-clickable')) {
+      swBtn.onclick = openStoreSwitch;
+      swBtn.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openStoreSwitch(); } };
+    }
     if (custSel) custSel.onchange = async e => {
       saleState.customer_id = e.target.value ? +e.target.value : null;
       const c = allCustomers.find(x => x.id == saleState.customer_id);
@@ -1195,7 +1884,7 @@ if (d.trust_full) {
       renderSaleItems();
       updateTotal();
     };
-    $('#sale-search').oninput = debounce(e => searchProducts(e.target.value), 200);
+    $('#sale-search').oninput = debounce(e => { saleAllOpen = false; searchProducts(e.target.value); }, 200);
     $('#sale-discount').oninput = updateTotal;
     // 批量折扣按钮（selIdx / allSel / applyDisc 定义在 renderSale 外的模块作用域）
     document.querySelectorAll('.qd').forEach(b => b.onclick = () => applyDisc(selIdx(), parseFloat(b.dataset.qd), '已给 %n 行设为 %v'));
@@ -1240,8 +1929,7 @@ if (d.trust_full) {
     // 模板自动同步：上传手上那份已填好的旧表，自动补齐新商品/新门店
     $('#sale-sync').onclick = () => $('#sale-sync-file').click();
     $('#sale-sync-file').onchange = e => { if (e.target.files[0]) syncOrderTemplate(e.target.files[0]); e.target.value = ''; };
-    const d = new Date();
-    $('#sale-date').value = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    $('#sale-date').value = todayISO();
     searchProducts('');
     showCustHint();
     renderSaleItems();
@@ -1273,13 +1961,111 @@ if (d.trust_full) {
       const hit = fuzzyFilter(allProducts, kw, p => [p.name, p.barcode, p.spec, p.unit]);
       hint = `<div class="muted" style="padding:2px 2px 6px;font-size:12px">模糊匹配 ${hit.length} 项，按相关度排序</div>`;
       list = hit.slice(0, 30);
-    } else { list = allProducts.slice(0, 8); }
-    box.innerHTML = hint + (list.length ? list.map(p => {
-      const r = priceFor(p.id);
-      const tag = r.from === 'store' ? '<span style="color:var(--primary);font-size:11px;margin-left:4px">上次价</span>' : '';
-      return `<div class="sale-item"><div class="info"><div class="nm">${highlight(p.name, kw)}${tag}</div><div class="sub">${highlight(p.spec || '', kw)} · ¥${r.price}/${highlight(p.unit || '', kw)}</div></div><button class="btn-sm" data-add="${p.id}">+</button></div>`;
-    }).join('') : '<div class="muted" style="padding:8px">无匹配商品（试试少输几个字，或用空格拆关键词）</div>');
+    } else {
+      // 🔴 历史优先：该门店有历史成交价的商品排前面（custPrice 就是它的记忆表）。
+      //   「点击关键词」会清空搜索词 → 这里要回到默认视图，展开状态一并复位。
+      const hist = [], rest = [];
+      allProducts.forEach(p => { (custPrice[p.id] != null && custPrice[p.id] > 0 ? hist : rest).push(p); });
+      list = hist.concat(rest);
+      // 🔴 行内固定只显示前 8 项（历史优先重排后的前 8），全量走弹窗
+      list = list.slice(0, 8);
+      const nh = Math.min(hist.length, 8);
+      if (nh) hint += `<div class="muted" style="padding:2px 2px 6px;font-size:12px">
+        <b style="color:var(--primary)">常买的前 ${nh} 项</b>已按本店历史成交价排在最前（该店有历史价 ${hist.length} 项 / 全部 ${allProducts.length} 项）</div>`;
+    }
+    const total = allProducts.length;
+    const shown = list.length;
+    // 🔴 2026-10-20 经理改需求：不再是「展开全部」把行内拉长，而是**弹窗**浏览全量。
+    //   理由（经理原话）：行内那块本来就窄，106 项铺开要滚很久 → 改成弹窗里双列滚动，省位置。
+    //   行内保留历史前 8 项做「快速入口」，两个入口并存不冲突。
+    const expander = (!kw && total > 0)
+      ? `<div class="sale-expand">
+           <button class="btn-sm" id="sale-browse-all"
+             style="flex:1 1 0;min-width:0;white-space:nowrap;height:40px">
+             浏览全部 ${total} 项商品（双列）
+           </button>
+         </div>`
+      : '';
+    box.innerHTML = hint
+      + (list.length ? list.map(p => {
+        const r = priceFor(p.id);
+        const histTag = r.from === 'store' ? '<span style="color:var(--primary);font-size:11px;margin-left:4px">上次价</span>' : '';
+        return `<div class="sale-item"><div class="info"><div class="nm">${highlight(p.name, kw)}${histTag}</div><div class="sub">${highlight(p.spec || '', kw)} · ¥${r.price}/${highlight(p.unit || '', kw)}</div></div><button class="btn-sm" data-add="${p.id}">+</button></div>`;
+      }).join('') : '<div class="muted" style="padding:8px">无匹配商品（试试少输几个字，或用空格拆关键词）</div>')
+      + (list.length && !kw ? `<div class="muted" style="padding:6px 2px 0;font-size:12px">显示 ${shown} / ${total} 项</div>` : '')
+      + expander;
     box.querySelectorAll('[data-add]').forEach(b => b.onclick = () => addSaleItem(+b.dataset.add));
+    const br = $('#sale-browse-all');
+    if (br) br.onclick = openProductPicker;
+  }
+
+  // ---------- 商品选择弹窗（双列滚动，2026-10-20） ----------
+  // 🔴 经理需求：「展开所有商品改成弹窗滚动，现在选择商品的界面太小了」
+  //            「商品上下滚动能调成双列同时滚动吗，节约位置」
+  //
+  // 📌 为什么双列能"同步滚动"却不用写任何 JS：
+  //     同一个滚动容器里直接放两列（CSS multi-column），浏览器本来就把内容按列排满再往下续。
+  //     如果写成两个并排的独立滚动 div，就必须 JS 对齐 scrollTop（会抖、会有 1px 误差）——
+  //     那是错的做法。这里用 column-count，同一个 scrollTop，天然同步。
+  //
+  // 🔴 关闭只用既有的 closeModal()，**绝不新增遮罩监听**（见 closeModal 上方的教训注释）。
+  function openProductPicker() {
+    prodPickKw = '';
+    renderProductPicker();
+    showModal(`选择商品（共 ${allProducts.length} 项）`, `
+      <div class="pick-search">
+        <input id="pick-search" placeholder="在全部商品里搜：商品名 / 条码 / 规格（空格拆多关键词）" value=""/>
+      </div>
+      <div id="pick-list" class="pick-grid"></div>
+      <div class="pick-foot">
+        <span class="muted" id="pick-count"></span>
+        <button class="btn" id="pick-done">完成</button>
+      </div>`);
+    const si = $('#pick-search');
+    if (si) {
+      si.oninput = debounce(e => { prodPickKw = e.target.value || ''; renderProductPicker(); }, 200);
+      setTimeout(() => { try { si.focus(); } catch (_) {} }, 60);
+    }
+    const dn = $('#pick-done');
+    if (dn) dn.onclick = closeModal;
+    renderProductPicker();
+  }
+
+  function renderProductPicker() {
+    const box = $('#pick-list'); if (!box) return;
+    const kw = (prodPickKw || '').trim();
+    // 排序口径与行内一致：该店有历史成交价的排前面（客户最常买的就是这些）
+    let list;
+    if (kw) {
+      list = fuzzyFilter(allProducts, kw, p => [p.name, p.barcode, p.spec, p.unit]).slice(0, 300);
+    } else {
+      const hist = [], rest = [];
+      allProducts.forEach(p => { (custPrice[p.id] != null && custPrice[p.id] > 0 ? hist : rest).push(p); });
+      list = hist.concat(rest);
+    }
+    const cnt = $('#pick-count');
+    if (cnt) cnt.textContent = kw
+      ? `匹配 ${list.length} 项 / 全部 ${allProducts.length} 项`
+      : `共 ${allProducts.length} 项 · 该店有历史价 ${allProducts.filter(p => custPrice[p.id] > 0).length} 项（已排在前面）`;
+    if (!list.length) {
+      box.innerHTML = '<div class="muted" style="padding:14px;text-align:center">无匹配商品（试试少输几个字，或用空格拆关键词）</div>';
+      return;
+    }
+    box.innerHTML = list.map(p => {
+      const r = priceFor(p.id);
+      const histTag = r.from === 'store' ? '<span class="pick-hist">上次价</span>' : '';
+      return `<div class="pick-item" data-add="${p.id}" role="button" tabindex="0">
+          <div class="pick-nm">${highlight(p.name, kw)}${histTag}</div>
+          <div class="pick-sub">${highlight(p.spec || '', kw)} · ¥${r.price}/${highlight(p.unit || '', kw)}</div>
+          <span class="pick-add" aria-hidden="true">+</span>
+        </div>`;
+    }).join('');
+    // 点商品：加购但**不关弹窗** —— 选货场景要连续加多件，只有点「完成」才关
+    box.querySelectorAll('[data-add]').forEach(el => {
+      const add = () => addSaleItem(+el.dataset.add);
+      el.onclick = add;
+      el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); add(); } };
+    });
   }
 
   function addSaleItem(pid) {
@@ -1299,6 +2085,9 @@ if (d.trust_full) {
     const qd = $('#sale-quickdisc'); if (qd) qd.style.display = (!isReturnMode() && saleState.items.length) ? '' : 'none';
     if (!saleState.items.length) box.innerHTML = '<div class="muted" style="padding:10px">尚未添加商品</div>';
     else {
+      // 🔴 客户模式：单价/折扣只读。勾选框也一并去掉 —— 它只服务于「批量设单品折扣」，
+      //   而客户没有折扣区，留一个勾选框点了没反应反而让人以为能操作。
+      const _roPrice = (ME.role === 'customer');
       box.innerHTML = saleState.items.map((it, i) => {
         const d = discOf(it);
         const pay = linePrice(it);
@@ -1309,14 +2098,21 @@ if (d.trust_full) {
         //   每行显式算出「这一行让了多少钱」，直接印在小计下面，不用去汇总区猜。
         const lineSave = +(((Number(it.price) || 0) - pay) * qtyN).toFixed(2);
         return `<div class="sale-item${thereAreDisc ? ' has-disc' : ''}">
-          <label class="sale-sel" title="勾选后可批量设折扣"><input type="checkbox" data-sel="${i}" ${it.sel ? 'checked' : ''}/></label>
+          ${_roPrice ? '' : `<label class="sale-sel" title="勾选后可批量设折扣"><input type="checkbox" data-sel="${i}" ${it.sel ? 'checked' : ''}/></label>`}
           <div class="info">
             <div class="nm">${esc(it.name)}</div>
             <div class="sub">${esc(it.spec || '')} · ${esc(it.unit || '')}${it.from === 'store' ? ' · <span style="color:var(--primary)">上次价</span>' : ''}${thereAreDisc ? ` · <span style="color:#f5a524">${it.disc_from === 'store' ? '上次折扣' : '已打折'}</span>` : ''}</div>
           </div>
           <div class="fields">
-            <label class="fd"><span>单价</span><input type="number" min="0" step="0.01" value="${it.price}" data-pi="${i}"/></label>
-            <label class="fd"><span>折扣</span><input type="number" min="0.1" max="1" step="0.01" value="${d}" data-di="${i}"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>
+            ${_roPrice
+              // 🔴 2026-10-19 经理：「客户不能修改折扣及金额 但是可以显示」。
+              //   只读 input（而不是删掉）：经理明确要求「可以显示」，客户要能看见自己付多少。
+              //   🔴 这只是交互层 —— 服务端已对客户强制按 customer_prices 取价（server.js
+              //      _forceStorePrice），改报文也改不动。这里加 readonly 只是不让用户白点。
+              ? `<label class="fd is-ro"><span>单价</span><input type="number" value="${it.price}" readonly title="单价按本店历史价，不能修改"/></label>
+                 <label class="fd is-ro"><span>折扣</span><input type="number" value="${d}" readonly title="折扣由商家定，不能修改"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`
+              : `<label class="fd"><span>单价</span><input type="number" min="0" step="0.01" value="${it.price}" data-pi="${i}"/></label>
+                 <label class="fd"><span>折扣</span><input type="number" min="0.1" max="1" step="0.01" value="${d}" data-di="${i}"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`}
             <label class="fd"><span>数量</span><input type="number" min="1" step="1" value="${it.qty}" data-i="${i}"/></label>
             <div class="fd line-amt"><span>小计</span><b class="${thereAreDisc ? 'is-disc' : ''}">${amt.toFixed(2)}</b></div>
             <button class="btn-sm danger" data-del="${i}">删</button>
@@ -1426,8 +2222,12 @@ if (d.trust_full) {
       }
       // 🔴 type:'return' → 服务端强制 status='returned'、金额取负、TH 单号、库存回补。
       //    退货不回补客户历史价（服务端已按 isReturn 跳过），避免退完把价/折扣改掉。
+      // 🔴 客户提交：整单折扣前端强制传 1（服务端也会再强制一次，这里是第三道保险）。
+      //    日期同理：客户不能改日期，前端一律传当天，服务端 _forceStorePrice 段还会覆盖成 ymdTodayISO()。
       d = await API.req('POST', '/api/orders', {
-        customer_id: saleState.customer_id, items: salePayload(), discount, order_date,
+        customer_id: saleState.customer_id, items: salePayload(),
+        discount: (ME.role === 'customer') ? 1 : discount,
+        order_date: (ME.role === 'customer') ? todayISO() : order_date,
         status: ret ? null : 'paid', type: ret ? 'return' : null
       });
       toast(ret ? ('退货单已生成 ' + d.order_no) : ('开单成功 ' + d.order_no));
@@ -1885,11 +2685,18 @@ if (d.trust_full) {
       const st = returned ? '' : (amt > 0 && Number(o.settled) > 0.005
         ? (Number(o.settled) >= amt - 0.005 ? '<span class="ar-tag ok">已结</span>' : '<span class="ar-tag part">部分收</span>')
         : '<span class="ar-tag none">未收</span>');
-      return `<div class="list-item${ORDER_MULTI ? ' multi' : ''}${ORDER_SEL.has(o.id) ? ' sel' : ''}" data-oid="${o.id}">
+      // 🔴 2026-10-19 经理：「客户的订单要能显示出来」→ 客户自己下的单打上「客户自助」标识。
+      //   判据用 placed_by_role === 'customer'（服务端新列），**不能**用「有备注」之类的弱信号。
+      //   老订单该列为 NULL → 不显示标识（不能回填成 staff，那等于把全部历史单标成商家单）。
+      const fromCust = String(o.placed_by_role || '') === 'customer';
+      const whoTag = fromCust
+        ? `<span class="ord-tag cust" title="这张单是客户用下单账号自助提交的${o.placed_by_name ? '（' + esc(String(o.placed_by_name)) + '）' : ''}">客户自助</span>`
+        : '';
+      return `<div class="list-item${ORDER_MULTI ? ' multi' : ''}${ORDER_SEL.has(o.id) ? ' sel' : ''}${fromCust ? ' is-cust-order' : ''}" data-oid="${o.id}">
         ${ORDER_MULTI ? `<input type="checkbox" data-sel="${o.id}" ${ORDER_SEL.has(o.id) ? 'checked' : ''}/>` : ''}
         <div style="flex:1;min-width:0">
-          <div class="top"><span class="nm ${cl}">${title}${st}</span><span style="color:var(--danger);font-weight:700">${fmt(amt)}</span></div>
-          <div class="meta">${highlight(o.customer_name || '', q)} · ${esc(o.order_date || o.created_at)}${!returned && Number(o.settled) > 0.005 ? ` · 已收 ${fmt(o.settled)}` : ''}</div>
+          <div class="top"><span class="nm ${cl}">${title}${whoTag}${st}</span><span style="color:var(--danger);font-weight:700">${fmt(amt)}</span></div>
+          <div class="meta">${highlight(o.customer_name || '', q)} · ${esc(o.order_date || o.created_at)}${!returned && Number(o.settled) > 0.005 ? ` · 已收 ${fmt(o.settled)}` : ''}${fromCust && o.placed_by_name ? ` · 账号 ${esc(String(o.placed_by_name))}` : ''}</div>
         </div></div>`;
     }).join('');
     const refreshSel = () => {
@@ -4160,6 +4967,28 @@ if (d.trust_full) {
     return b;
   }
   function closeModal() { $('#modal-overlay').classList.add('hidden'); }
+  // 📌 弹窗关闭能力**本来就已存在**（两处，都在绑定区）：
+  //    ① $('#modal-close').onclick  → 「×」按钮（line 4362）
+  //    ② $('#modal-overlay').onclick → 点遮罩空白处关闭（line 4363，判 e.target.id）
+  //    ESC 也能关（下面这处）。
+  //
+  // 🔴🔴 2026-10-20 踩过的坑（写下来防止再犯）：
+  //    曾误判成「全站弹窗没有关闭入口」，于是又加了一个 document 级遮罩点击监听。
+  //    结果**弹窗一打开就被关掉**（display:none、offsetHeight=0，但 title/body 已写入）。
+  //    原因：点入口卡片 → showModal() 摘掉 .hidden → 同一 click 继续冒泡到 #modal-overlay
+  //    → 它的 onclick 里 e.target.id 不是 'modal-overlay'（target 是入口卡片）本不该关，
+  //    但**新加的 document 监听在 setTimeout(0) 之后再判一次**，那时 target 仍不在 .modal 内
+  //    → 判定「点了遮罩」→ 关闭。
+  //    结论：遮罩关闭只能有**一个**判据，且必须用 e.target.id 精确匹配（不能用「不在 .modal 内」，
+  //    因为点击发生时 target 可能来自别处）。ESC 是安全的补充，不是替代。
+  if (!document.__modalEscBound) {
+    document.__modalEscBound = true;
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      const o = document.querySelector('#modal-overlay');
+      if (o && !o.classList.contains('hidden')) closeModal();
+    });
+  }
   // ---------- 自动检查更新（弹窗提醒 + 30天不再提醒） ----------
   const UP_SEEN = 'erp_update_seen_ts';
   const UP_SUPPRESS = 'erp_update_suppress_until';

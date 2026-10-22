@@ -11,13 +11,18 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.heping.erpnative.data.SessionStore
 import com.heping.erpnative.ui.components.toast
 import com.heping.erpnative.vm.*
+import com.heping.erpnative.vm.PurchaseViewModel
 import kotlinx.coroutines.launch
 
 enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    // 🔴 v5.7.0 经理 2026-10-21 指定顺序：开单 订单 采购 商品 客户 报表 我的欠款 设置
+    //    （采购提到商品/客户前面；设置保持最后）
     Sale("开单", Icons.Filled.PointOfSale),
     Orders("订单", Icons.Filled.ReceiptLong),
-    Customers("客户", Icons.Filled.People),
+    // 采购含进价（成本信息），只有 boss/manager 有 purchase.view；员工没这权限时该Tab 自动不显示。
+    Purchase("采购", Icons.Filled.LocalShipping),
     Products("商品", Icons.Filled.Inventory2),
+    Customers("客户", Icons.Filled.People),
     Reports("报表", Icons.Filled.BarChart),
     MyAr("我的欠款", Icons.Filled.AccountBalanceWallet),
     Settings("设置", Icons.Filled.Settings)
@@ -36,6 +41,9 @@ private fun visibleTabs(): List<Tab> {
             // 员工没 ar.view 就退回只显示销售那组，别整页藏起来。
             Tab.Reports -> SessionStore.can("analysis.view") || SessionStore.can("ar.view")
             Tab.MyAr -> false          // 我的欠款仅客户账号
+            // 🔴 采购页：采购建议/采购单要 purchase.view，库存明细/流水要 inventory.view。
+            //    两者都拿不到就整个页签不显示（staff 只有 inventory.view → 只看得到库存那两页）。
+            Tab.Purchase -> SessionStore.can("purchase.view") || SessionStore.can("inventory.view")
             else -> true
         }
     }
@@ -54,6 +62,8 @@ fun MainScreen(onLogout: () -> Unit) {
     val settingsVm: SettingsViewModel = viewModel()
     // 🔴 应收应付（挂账 + 收款核销），客户页与报表页共用同一个实例
     val arVm: ArViewModel = viewModel()
+    // 🔴 v5.6.9：采购与库存（采购建议 / 采购单 / 库存明细 / 库存流水）
+    val purchaseVm: PurchaseViewModel = viewModel()
 
     // 编辑订单：订单页点「编辑」→ 装车到 SaleViewModel → 切到开单页自由改（可增删商品）
     // 开单页保存/取消后要跳回订单页，所以这里留一个「保存后回到哪」的记忆。
@@ -100,6 +110,7 @@ fun MainScreen(onLogout: () -> Unit) {
                 Tab.Reports -> ReportsScreen(analyticsVm = analyticsVm, arVm = arVm)
                 Tab.MyAr -> MyArScreen(arVm = arVm)
                 Tab.Settings -> SettingsScreen(vm = settingsVm, onLogout = onLogout)
+                Tab.Purchase -> PurchaseScreen(vm = purchaseVm)
             }
         }
     }

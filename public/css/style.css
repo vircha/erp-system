@@ -144,6 +144,153 @@ label{display:block;font-size:14px;color:var(--muted);margin:12px 0 4px;}
 .sale-total .amt{color:var(--danger);}
 .search-result{max-height:220px;overflow-y:auto;}
 
+/* =============================================================================
+   商品选择弹窗：双列滚动（2026-10-20）
+   经理：「展开所有商品改成弹窗滚动，现在选择商品的界面太小了」
+        「商品上下滚动能调成双列同时滚动吗，节约位置」
+   📌 为什么用 grid 而不是 column-count（**踩过坑，别改回去**）：
+      CSS 多栏（column-count）在**固定高度容器**里是「竖向填充」——第 1 列填满
+      可视高才换到第 2 列；内容超过两列容量后，浏览器会把后续内容排到
+      **容器可视区之外的第 3、第 4…列**，只能横向滚动才看得见。
+      实测 108 项里有 60 项落在可视区外的列里 → 客户根本翻不到，等于商品丢失。
+      grid-template-columns 是行优先填充，超出部分老老实实往下堆 → 纵向滚动拿全。
+      两列依然共用同一个滚动容器，scrollTop 只有一个，天然同步，
+      绝不会出现「左右两列滚动位置对不齐」。
+   ============================================================================ */
+.pick-search{margin-bottom:10px;}
+.pick-search input{width:100%;}
+
+.pick-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));   /* 🔴 minmax(0,1fr) 不能省：
+      默认 1fr 的最小尺寸是 auto，商品名一长就把整列撑破，grid 横向溢出 */
+  gap:8px;
+  align-content:start;      /* 🔴 不能省：否则不足一屏时各行被拉高填满，间距失控 */
+  max-height:min(58vh,520px);overflow-y:auto;
+  padding:2px;              /* 🔴 不能省：否则两列贴边，最后一列看着贴边框 */
+  -webkit-overflow-scrolling:touch;
+}
+.pick-item{
+  display:block;position:relative;
+  margin:0;padding:9px 34px 9px 10px;
+  border:1.5px solid var(--border);border-radius:9px;background:#fff;
+  cursor:pointer;user-select:none;line-height:1.25;
+  /* 🔴 minmax(0,1fr) 只防列被撑破，文字自己还要截断，否则商品名会换行把行高顶得参差不齐 */
+  min-width:0;
+  min-height:52px;
+  transition:border-color .12s,background .12s;
+}
+.pick-item:hover{border-color:var(--primary);background:#f7fbf9;}
+.pick-item:active{transform:translateY(1px);}
+.pick-item:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+.pick-nm{font-size:13px;font-weight:600;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pick-sub{font-size:11px;color:var(--muted);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pick-hist{color:var(--primary);font-size:10px;font-weight:400;margin-left:4px;}
+/* 加号钉在右上角：列表窄，双列并排时左右两列各有自己的加号，不会点错行 */
+.pick-add{
+  position:absolute;top:8px;right:8px;
+  width:22px;height:22px;border-radius:6px;
+  background:var(--primary);color:#fff;
+  font-size:15px;font-weight:700;line-height:22px;text-align:center;
+}
+.pick-foot{display:flex;align-items:center;gap:10px;margin-top:10px;
+  padding-top:9px;border-top:1px dashed var(--border);}
+.pick-foot .muted{flex:1 1 auto;font-size:12px;min-width:0;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pick-foot .btn{flex:0 0 auto;height:38px;padding:0 22px;}
+
+@media (max-width:720px){
+  /* 🔴 手机上**必须单列**：双列会把商品名挤成「只剩前两个字 + 省略号」，
+     客户就完全认不出买的是哪个货了（门店卡片那次已踩过同类坑）。
+     「节约位置」在手机上靠加高行高/加大字号实现，不靠压缩列数。 */
+  .pick-grid{grid-template-columns:1fr;max-height:56vh;}
+  .pick-item{padding:11px 38px 11px 12px;min-height:56px;}
+  .pick-nm{font-size:14px;}
+  .pick-sub{font-size:12px;}
+  .pick-add{top:11px;right:11px;width:24px;height:24px;line-height:24px;}
+  .pick-foot .btn{height:44px;flex:1 1 0;}
+}
+
+/* =============================================================================
+   客户开单：门店选择（2026-10-19）
+   🔴 起因：经理两次反馈「我都不知道原来门店可以选择的」。
+      ① 顶部入口是灰底小按钮 btn-sm gray，长得跟旁边的说明文字一样，看不出能点；
+      ② 弹窗里的列表用 class="search-item"，而 CSS 里**根本没有这个 class**
+         → 渲染成裸文本行，一眼看不出是可选列表。
+   对策：整块做成可点击卡片 + 主色描边选中态 + 文字 pill（不用 ✅ emoji，
+   emoji 字形在各系统不一致，桌面/手机/打印机预览三种环境下都可能对不齐）。
+   复用 .store-picker-* 的视觉语言（那套已在老板端账号管理里跑了很久），
+   但语义不同 —— 这里是**单选切换**，所以不共用 .store-picker-item 的 :has(input:checked)。
+   ============================================================================ */
+.store-now{
+  display:flex;align-items:center;gap:10px;
+  padding:11px 12px;margin:8px 0 0;
+  border:1.5px solid var(--border);border-radius:10px;
+  background:#f7fbf9;user-select:none;
+}
+.store-now.is-clickable{cursor:pointer;}
+.store-now.is-clickable:hover{border-color:var(--primary);background:#f2fbf6;}
+.store-now.is-clickable:active{transform:translateY(1px);}
+.store-now-ico{font-size:20px;line-height:1;flex:0 0 auto;}
+.store-now-main{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;}
+.store-now-cap{font-size:11px;color:var(--muted);line-height:1;}
+.store-now-name{font-size:16px;font-weight:700;color:var(--text);line-height:1.2;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* 右侧动作提示：这是「这里能点」的主要视觉线索，不能省 */
+.store-now-act{flex:0 0 auto;display:flex;align-items:center;gap:3px;
+  font-size:12px;font-weight:600;color:#fff;background:var(--primary);
+  padding:7px 10px;border-radius:7px;line-height:1;}
+.store-now-arrow{font-size:15px;font-weight:400;line-height:1;}
+.store-now-lock{flex:0 0 auto;font-size:11px;color:var(--muted);
+  border:1px solid var(--border);background:#fff;padding:5px 8px;border-radius:7px;line-height:1;}
+.store-now:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+
+.store-switch-list{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:8px;
+  max-height:46vh;overflow-y:auto;padding:2px;
+}
+.store-switch-item{
+  display:flex;align-items:center;gap:8px;
+  padding:11px 10px;border:1.5px solid var(--border);border-radius:9px;
+  background:#fff;cursor:pointer;user-select:none;line-height:1.2;
+}
+.store-switch-item:hover{border-color:var(--primary);background:#f7fbf9;}
+.store-switch-item:active{transform:translateY(1px);}
+.store-switch-item.is-cur{border-color:var(--primary);background:#f2fbf6;box-shadow:0 0 0 2px rgba(31,158,117,.10) inset;}
+.store-switch-ico{font-size:17px;flex:0 0 auto;line-height:1;}
+.store-switch-name{flex:1 1 auto;min-width:0;font-size:13px;font-weight:600;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.store-switch-pill{flex:0 0 auto;font-size:11px;font-weight:700;color:#fff;background:var(--primary);
+  padding:4px 7px;border-radius:20px;line-height:1;}
+.store-switch-go{flex:0 0 auto;font-size:11px;color:var(--muted);line-height:1;}
+.store-switch-item:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+
+/* 「展开全部商品」：不能只写一句纯文字提示，客户不会去点 —— 必须是真按钮 */
+.sale-expand{display:flex;gap:8px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);}
+.sale-expand .btn-sm{flex:1 1 0;min-width:0;white-space:nowrap;}
+
+/* 客户模式：单价/折扣只读（能看见、不能改） */
+.sale-item .fields .fd.is-ro>span{color:var(--muted);}
+.sale-item .fields .fd.is-ro input{
+  background:#f4f6f5;color:var(--muted);cursor:not-allowed;
+  border-style:dashed;
+}
+input[readonly]{background:#f4f6f5;color:var(--muted);cursor:not-allowed;}
+
+/* =============================================================================
+   管理界面：客户自助下单标识（2026-10-19）
+   判据是服务端 orders.placed_by_role === 'customer'（客户账号下的单）。
+   老订单该列为 NULL → 不显示标识（不回填成 staff，那会把全部历史单标成商家单）。
+   ============================================================================ */
+.ord-tag{display:inline-block;font-size:10px;font-weight:700;line-height:1;
+  padding:3px 6px;border-radius:5px;margin-left:5px;vertical-align:middle;white-space:nowrap;}
+.ord-tag.cust{color:#8a4fd3;background:rgba(138,79,211,.12);border:1px solid rgba(138,79,211,.28);}
+/* 整行左侧竖条：颜色与 badge 一致，扫列表时不用逐行读字就能挑出来 */
+.list-item.is-cust-order{box-shadow:inset 3px 0 0 #8a4fd3,0 1px 3px rgba(0,0,0,.04);}
+.list-item.is-cust-order.sel{box-shadow:0 0 0 2px var(--primary) inset;}
+
 /* 列表 */
 .list-item{background:var(--card);border-radius:10px;padding:12px;margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.04);}
 .list-item .top{display:flex;justify-content:space-between;align-items:center;gap:8px;}
@@ -569,4 +716,202 @@ mark{background:#fff2a8;color:inherit;padding:0 1px;border-radius:2px;}
 @media (max-width:720px){
   /* 门店多选手机上单列，别两列挤成两行半个字 */
   .store-picker-list{grid-template-columns:1fr;max-height:46vh;}
+}
+
+/* ---- 客户开单门店卡片：移动端适配（2026-10-19） ---- */
+@media (max-width:720px){
+  /* 手机上单列：两列会把店名挤成两行半个字，反而看不出这是可点的
+     （.store-picker-list 早就踩过这个坑，手机端必须单列 + 限高） */
+  .store-switch-list{grid-template-columns:1fr;max-height:46vh;}
+  .store-now{padding:12px;gap:9px;}
+  .store-now-name{font-size:17px;}
+  .store-now-act{padding:8px 12px;font-size:13px;}
+  /* 只读单价/折扣与数量并排时容易挤扁，给一个下限宽度 */
+  .sale-item .fields .fd.is-ro input{width:62px;}
+  .list-item.is-cust-order{box-shadow:inset 4px 0 0 #8a4fd3,0 1px 3px rgba(0,0,0,.04);}
+}
+
+/* ============ 采购与库存（2026-10-21）============
+   🔴 双列一律用 grid，🚫 永不用 column-count
+      （column-count 竖向填充，超出部分会排到容器可视区外的列）。
+   🔴 按钮行禁 flex-wrap：用 flex:1 1 0;min-width:0;nowrap，多块用 grid。 */
+.pu-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.pu-tab{
+  padding:8px 14px;border:1px solid var(--border);border-radius:8px;background:#fff;
+  color:#333;font-size:14px;cursor:pointer;white-space:nowrap;
+}
+.pu-tab:hover{border-color:var(--primary);}
+.pu-tab.active{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:500;}
+
+/* 采购建议表：列宽固定，横向可滚 */
+.pu-tbl{width:100%;border-collapse:collapse;font-size:13px;}
+.pu-tbl th{font-size:12px;color:var(--muted);font-weight:600;text-align:left;padding:7px 6px;white-space:nowrap;border-bottom:1px solid var(--border);}
+.pu-tbl td{padding:7px 6px;border-bottom:1px solid #f0f0f0;white-space:nowrap;}
+.pu-tbl .num{text-align:right;font-variant-numeric:tabular-nums;}
+.pu-tbl .nm{max-width:220px;overflow:hidden;text-overflow:ellipsis;}
+/* 建议量列高亮 */
+.pu-sug{font-weight:700;color:var(--primary);}
+.pu-neg{color:var(--danger);}
+/* 差异列（账面 vs 推导）*/
+.pu-diff{color:#b45309;font-weight:600;}
+
+/* 汇总卡片行：grid 而非 flex-wrap */
+.pu-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:10px 0;}
+.pu-stat{background:#fafafa;border:1px solid var(--border);border-radius:10px;padding:10px 12px;}
+.pu-stat .k{font-size:12px;color:var(--muted);margin-bottom:3px;}
+.pu-stat .v{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;}
+
+/* 明细行编辑（采购建单）*/
+.pu-line{display:grid;grid-template-columns:minmax(0,1fr) 84px 96px 96px 40px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #f0f0f0;}
+.pu-line input{width:100%;padding:8px 9px;border:1px solid var(--border);border-radius:8px;font-size:14px;min-width:0;}
+.pu-line .t{font-size:12px;color:var(--muted);margin-bottom:2px;display:block;}
+/* 🔴 input 的 class 必须是 pu-l-p（不能也叫 pu-l-price）：
+   同一行里若 input 与列容器同 class，querySelector('.pu-l-price') 会先命中外层 div
+   → .value 是 undefined → 进价永远读成 0（真踩过）。 */
+.pu-line .pu-l-p{text-align:right;}
+/* 草稿浮动条：显示已加入的采购明细 */
+.pu-draft{
+  position:sticky;bottom:0;z-index:20;margin-top:12px;
+  display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;
+  padding:10px 12px;border-radius:10px;background:#1f2b3a;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18);
+}
+.pu-draft .d-t{font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-draft .d-b{background:var(--primary);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-size:14px;cursor:pointer;white-space:nowrap;}
+/* 底部操作条：固定不换行 */
+.pu-bar{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:14px;}
+.pu-bar .btn-sm{width:100%;white-space:nowrap;}
+
+/* 流水条目 */
+.pu-mv{display:flex;align-items:baseline;gap:10px;padding:8px 2px;border-bottom:1px solid #f5f5f5;font-size:13px;flex-wrap:wrap;}
+.pu-mv .t{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;}
+.pu-mv .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-mv .q{font-weight:700;font-variant-numeric:tabular-nums;}
+.pu-mv .q.in{color:var(--primary);}
+.pu-mv .q.out{color:var(--danger);}
+
+/* 标签 */
+.pu-tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;background:#f0f0f0;color:#666;}
+.pu-tag.in{background:#e6f7ee;color:#0B6B49;}
+.pu-tag.out{background:#fdeaea;color:#b91c1c;}
+.pu-tag.void{background:#f0f0f0;color:#888;text-decoration:line-through;}
+
+/* 移动端窄屏：表头可以横向滚，采购行改单列 */
+@media (max-width:720px){
+  .pu-tbl th,.pu-tbl td{padding:6px 5px;font-size:12px;}
+  .pu-tbl .nm{max-width:130px;}
+  .pu-line{grid-template-columns:minmax(0,1fr) 70px 70px 34px;gap:6px;}
+  .pu-line .pu-l-price{display:none;}
+  .pu-bar{grid-template-columns:1fr 1fr;}
+}
+/* ========== v5.6.10 采购建议双列卡片 + 选商品多列网格（经理 2026-10-21） ========== */
+/* 🔴 双列一律 grid，禁用 column-count（竖向填充会排到容器可视区外） */
+/* 🔴 v5.7.1：右侧有固定悬浮按钮条 → 网格右侧留出 150px，循环区最右一列不被压住。
+      用 padding-right 而非 margin，卡片宽度自适应不漏排。 */
+.pu-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;
+  margin-top:10px;align-content:start;padding-right:150px;
+}
+.pu-cd{
+  position:relative;background:#fff;border:1px solid var(--border);border-radius:10px;
+  padding:9px 10px 8px;cursor:pointer;transition:border-color .12s,box-shadow .12s;
+  display:flex;flex-direction:column;gap:3px;min-width:0;
+}
+.pu-cd:hover{border-color:var(--primary);}
+.pu-cd.sel{border-color:var(--primary);box-shadow:0 0 0 2px rgba(0,120,212,.12);background:#f5fbff;}
+.pu-cd-nm{font-size:13px;font-weight:700;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-cd-sp{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-cd-qty{font-size:12px;color:#333;}
+.pu-cd-qty b{color:var(--primary);font-size:15px;font-variant-numeric:tabular-nums;}
+.pu-cd-meta{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-cd-foot{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;margin-top:2px;}
+.pu-cd-amt{color:var(--primary);font-weight:700;}
+.pu-cd-in{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-top:4px;}
+.pu-cd-in span{white-space:nowrap;}
+.pu-cd-in input{flex:1;min-width:0;width:100%;padding:5px 7px;border:1px solid var(--border);border-radius:6px;font-size:13px;text-align:right;font-variant-numeric:tabular-nums;}
+.pu-cd-badge{position:absolute;top:7px;right:8px;font-size:10px;background:#e6f7ee;color:#0B6B49;padding:1px 6px;border-radius:5px;}
+.pu-cd-ck{font-size:11px;color:var(--muted);text-align:right;margin-top:3px;}
+.pu-cd.sel .pu-cd-ck{color:var(--primary);font-weight:600;}
+/* 🔴 v5.7.1（2026-10-21 经理反馈「选好产品要滑到下面才能找到按钮，太麻烦」）
+    底部四按钮底栏 → 改**右侧悬浮**。随页面滚动常驻，勾完商品抬右手就能点。
+    - 主按钮「加入采购单」绿底置顶最醒目，已选数量直接显示在按钮里；
+    - 全选 / 估算 / 清空 收成一行三个小灰钮；
+    - 左侧小把手可手动折叠成一颗窄胶囊，让出卡片区域；
+    - 🔴 z-index 必须 < .overlay(50)，否则会把「选商品/草稿」弹窗压住。*/
+.pu-float{
+  position:fixed;right:14px;top:50%;transform:translateY(-50%);z-index:30;
+  display:flex;flex-direction:column;gap:7px;width:132px;
+  padding:8px 8px 9px;border-radius:14px;
+  background:rgba(255,255,255,.94);border:1px solid var(--border);
+  box-shadow:0 4px 18px rgba(0,0,0,.10);
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+}
+.pu-fb-main{
+  display:flex;flex-direction:column;align-items:center;gap:1px;
+  width:100%;padding:9px 6px;border:none;border-radius:10px;cursor:pointer;
+  background:var(--primary,#0F7BC4);color:#fff;font-size:14px;font-weight:700;line-height:1.25;
+  box-shadow:0 2px 8px rgba(15,123,196,.28);
+}
+.pu-fb-main:active{filter:brightness(.94);}
+.pu-fb-n{font-size:11px;font-weight:400;opacity:.92;font-variant-numeric:tabular-nums;}
+.pu-fb-n b{font-weight:700;}
+.pu-fb-sub{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;}
+.pu-fb-b{
+  width:100%;min-width:0;padding:6px 2px;border:1px solid var(--border);
+  border-radius:8px;background:#f5f6f8;color:#42505f;
+  font-size:12px;line-height:1.2;cursor:pointer;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;text-align:center;
+}
+.pu-fb-b:active{background:#eceff3;}
+.pu-fb-fold{
+  position:absolute;left:-15px;top:50%;transform:translateY(-50%);
+  width:15px;height:44px;padding:0;border:none;cursor:pointer;
+  background:rgba(255,255,255,.94);border:1px solid var(--border);border-right:none;
+  border-radius:7px 0 0 7px;color:#7b8794;font-size:13px;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:-2px 2px 10px rgba(0,0,0,.08);
+}
+/* 折叠态：只剩主按钮，缩成一颗窄胶囊 */
+.pu-float.fold{width:60px;}
+.pu-float.fold .pu-fb-sub{display:none;}
+.pu-float.fold .pu-fb-main{font-size:12px;padding:8px 4px;}
+
+/* 选商品弹窗：多列自适应网格 + 多选 + 填数量 */
+.modal-wide{max-width:900px;}          /* 🔴 默认 .modal 只有 420px，多列网格放不下 → 撑宽 */
+.pu-pk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:9px;margin-top:10px;max-height:52vh;overflow-y:auto;align-content:start;}
+.pu-pk-cd{
+  background:#fff;border:1px solid var(--border);border-radius:9px;padding:8px 9px;cursor:pointer;
+  display:flex;flex-direction:column;gap:4px;min-width:0;transition:border-color .12s,box-shadow .12s;
+}
+.pu-pk-cd:hover{border-color:var(--primary);}
+.pu-pk-cd.sel{border-color:var(--primary);box-shadow:0 0 0 2px rgba(0,120,212,.12);background:#f5fbff;}
+.pu-pk-top{display:flex;align-items:center;gap:6px;min-width:0;}
+.pu-pk-ck{font-size:15px;line-height:1;color:var(--primary);}
+.pu-pk-nm{flex:1;min-width:0;font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-pk-sp{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pu-pk-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px;}
+.pu-pk-row label{display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--muted);min-width:0;}
+.pu-pk-row input{width:100%;min-width:0;padding:4px 6px;border:1px solid var(--border);border-radius:6px;font-size:12px;text-align:right;font-variant-numeric:tabular-nums;}
+.pu-pk-bar{display:grid;grid-template-columns:auto 1fr auto auto auto;gap:8px;align-items:center;margin-top:12px;}
+.pu-pk-bar .btn-sm{white-space:nowrap;}
+
+@media(max-width:640px){
+  .modal-wide{max-width:100%;}
+  .pu-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;padding-right:116px;}
+  /* 🔴 窄屏浮动条收窄贴边，别挡住卡片文字 */
+  .pu-float{right:8px;width:104px;padding:6px 6px 7px;gap:5px;}
+  .pu-fb-main{font-size:13px;padding:7px 4px;}
+  .pu-fb-b{font-size:11px;padding:5px 1px;}
+  .pu-float.fold{width:52px;}
+  .pu-pk-grid{grid-template-columns:repeat(auto-fill,minmax(132px,1fr));max-height:44vh;gap:7px;}
+  .pu-pk-row{grid-template-columns:1fr 1fr;gap:4px;}
+  .pu-pk-bar{grid-template-columns:1fr 1fr;gap:6px;}
+  .pu-pk-bar #pu-pk-info{grid-column:1/-1;text-align:center;}
+}
+@media(max-width:400px){
+  .pu-grid{grid-template-columns:repeat(2,minmax(0,1fr));padding-right:100px;}   /* 🔴 极窄屏锁 2 列，避免 1 列过长 */
+  .pu-cd-in{flex-direction:column;align-items:stretch;gap:2px;}
+  .pu-float{width:88px;right:6px;}
+  .pu-fb-main{font-size:12px;}
+  .pu-fb-sub{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;}
+  .pu-fb-b{font-size:10px;}
 }

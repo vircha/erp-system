@@ -523,3 +523,163 @@ data class StockAlert(
     @SerializedName("min_stock") val minStock: Double = 0.0,
     val gap: Double = 0.0
 )
+
+// ================= 采购与库存（v5.6.9；管家婆「以销定购」口径）=================
+//
+// 🔴 业务口径（经理 2026-10-21 明确，与网页端/服务端完全一致）：
+//    建议采购量 = max(0, 净销售数量 - 已采购入库数量)
+//      净销售数量 = Σ order_items.qty（销售正、退货负，自动抵消）
+//      已采购入库 = Σ purchase_items.qty（status='received' 的采购单）
+//    采购入库后：推导库存 = (已入库 - 已销) + (已销 - 已入库) = 0
+//    ✅ **故意不依赖 inventory.qty**：账面库存有历史误差，但采购建议必须准。
+//    ✅ derive_qty = max(0, 已入库 - 已销)（理论库存）；diff = 账面 - 推导（历史误差，只呈现不自动改）
+//    🔴 2026-10-21 经理确认：推导库存为负按0（没进货就是 0，不是亏空）。
+//      服务端 4 处口径已统一 clamp，本App 只**直接显示**服务端返回值，不做本地二次计算，
+//      所以服务端改口径后无需重新发版即自动生效。
+
+/** 采购建议行（/api/purchase-suggestions） */
+data class PurchaseSuggestion(
+    val id: Int = 0,
+    val name: String = "",
+    val spec: String? = null,
+    val unit: String? = null,
+    val barcode: String? = null,
+    val cost: Double = 0.0,
+    val price: Double = 0.0,
+    /** 净销售数量（销售正、退货负） */
+    @SerializedName("sold_qty") val soldQty: Double = 0.0,
+    /** 已采购入库数量 */
+    @SerializedName("in_qty") val inQty: Double = 0.0,
+    /** 账面库存（inventory.qty） */
+    @SerializedName("stock_qty") val stockQty: Double = 0.0,
+    /** 建议采购量 = max(0, sold - in) */
+    @SerializedName("suggest_qty") val suggestQty: Double = 0.0,
+    /** 采购入库后的预计账面库存 */
+    @SerializedName("stock_after") val stockAfter: Double = 0.0,
+    /** 推导库存 = 已入库 - 已销 */
+    @SerializedName("derive_qty") val deriveQty: Double = 0.0,
+    /** 账面 - 推导 = 历史误差 */
+    val diff: Double = 0.0
+)
+
+/** 库存明细行（/api/inventory/summary） */
+data class InventoryRow(
+    val id: Int = 0,
+    val name: String = "",
+    val spec: String? = null,
+    val barcode: String? = null,
+    val unit: String? = null,
+    @SerializedName("stock_qty") val stockQty: Double = 0.0,
+    @SerializedName("low_threshold") val lowThreshold: Double = 0.0,
+    @SerializedName("sold_qty") val soldQty: Double = 0.0,
+    @SerializedName("in_qty") val inQty: Double = 0.0,
+    @SerializedName("last_move") val lastMove: String? = null,
+    @SerializedName("derive_qty") val deriveQty: Double = 0.0,
+    val diff: Double = 0.0
+)
+
+/** 库存流水行（/api/stock-moves） */
+data class StockMove(
+    val id: Int = 0,
+    /** 时间戳（采购来自 stock_moves.created_at，销售来自 orders.created_at） */
+    val ts: String? = null,
+    @SerializedName("product_id") val productId: Int = 0,
+    @SerializedName("product_name") val productName: String = "",
+    /** purchase_in / purchase_void / sale_out / sale_return */
+    @SerializedName("move_type") val moveType: String = "",
+    val qty: Double = 0.0,
+    @SerializedName("ref_type") val refType: String? = null,
+    @SerializedName("ref_id") val refId: Int? = null,
+    @SerializedName("ref_no") val refNo: String? = null,
+    val remark: String? = null,
+    val operator: String? = null,
+    /** purchase / sale —— 采购侧读表，销售侧从 order_items 反推 */
+    val source: String? = null
+)
+
+/** 供应商（/api/suppliers） */
+data class Supplier(
+    val id: Int = 0,
+    val name: String = "",
+    val contact: String? = null,
+    val phone: String? = null,
+    val remark: String? = null
+)
+
+/** 采购单（/api/purchases 列表 & /api/purchases/:id 详情头部） */
+data class PurchaseOrder(
+    val id: Int = 0,
+    @SerializedName("purchase_no") val purchaseNo: String = "",
+    @SerializedName("supplier_id") val supplierId: Int? = null,
+    @SerializedName("supplier_name") val supplierName: String? = null,
+    val total: Double = 0.0,
+    val payable: Double = 0.0,
+    val discount: Double = 1.0,
+    @SerializedName("purchase_date") val purchaseDate: String? = null,
+    /** received（已入库） / void（已作废） */
+    val status: String = "received",
+    val remark: String? = null,
+    @SerializedName("placed_by_name") val placedByName: String? = null,
+    @SerializedName("created_at") val createdAt: String? = null,
+    /** 明细行数（列表接口带；详情接口用 items.size） */
+    @SerializedName("item_count") val itemCount: Int = 0
+)
+
+/** 采购单明细行 */
+data class PurchaseItem(
+    val id: Int = 0,
+    @SerializedName("purchase_id") val purchaseId: Int = 0,
+    @SerializedName("product_id") val productId: Int = 0,
+    @SerializedName("product_name") val productName: String = "",
+    val spec: String? = null,
+    val barcode: String? = null,
+    val unit: String? = null,
+    val qty: Double = 0.0,
+    val price: Double = 0.0,
+    val subtotal: Double = 0.0
+)
+
+/** 采购单详情（头部 + 明细） */
+data class PurchaseOrderDetail(
+    val id: Int = 0,
+    @SerializedName("purchase_no") val purchaseNo: String = "",
+    @SerializedName("supplier_id") val supplierId: Int? = null,
+    @SerializedName("supplier_name") val supplierName: String? = null,
+    val total: Double = 0.0,
+    val payable: Double = 0.0,
+    val discount: Double = 1.0,
+    @SerializedName("purchase_date") val purchaseDate: String? = null,
+    val status: String = "received",
+    val remark: String? = null,
+    @SerializedName("placed_by_name") val placedByName: String? = null,
+    @SerializedName("created_at") val createdAt: String? = null,
+    val items: List<PurchaseItem> = emptyList()
+)
+
+/** 采购单明细行（提交用） */
+data class PurchaseLineReq(
+    @SerializedName("product_id") val productId: Int = 0,
+    val qty: Double = 0.0,
+    /** 进价；null = 服务端用商品表 cost */
+    val price: Double? = null
+)
+
+/** 新建采购单请求（建单即入库） */
+data class CreatePurchaseRequest(
+    @SerializedName("supplier_id") val supplierId: Int? = null,
+    @SerializedName("supplier_name") val supplierName: String? = null,
+    val items: List<PurchaseLineReq> = emptyList(),
+    val discount: Double = 1.0,
+    @SerializedName("purchase_date") val purchaseDate: String? = null,
+    val remark: String? = null
+)
+
+/** 新建采购单返回 */
+data class PurchaseCreated(
+    val id: Int = 0,
+    @SerializedName("purchase_no") val purchaseNo: String = "",
+    val total: Double = 0.0,
+    val payable: Double = 0.0,
+    @SerializedName("item_count") val itemCount: Int = 0
+)
+

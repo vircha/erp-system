@@ -395,6 +395,45 @@ interface ErpApi {
 
     @POST("api/books/switch")
     suspend fun switchBook(@Body b: Map<String, Int>): BookSwitchResponse
+
+    // ---------- 采购与库存（v5.6.9；管家婆「以销定购」）----------
+    // 🔴 口径：建议采购量 = max(0, 净销售数量 - 已采购入库数量)，采购入库后推导库存 = 0。
+    //    与网页端/服务端完全一致，手机端只是同一套接口的另一张皮。
+
+    @GET("api/suppliers")
+    suspend fun suppliers(): List<Supplier>
+
+    @POST("api/suppliers")
+    suspend fun createSupplier(@Body b: Map<String, String>): IdResponse
+
+    /** 采购建议（以销定购） */
+    @GET("api/purchase-suggestions")
+    suspend fun purchaseSuggestions(): List<PurchaseSuggestion>
+
+    /** 库存明细（账面 / 推导 / 差异 三口径）；only = neg | diff | alert */
+    @GET("api/inventory/summary")
+    suspend fun inventorySummary(
+        @Query("kw") kw: String? = null,
+        @Query("only") only: String? = null
+    ): List<InventoryRow>
+
+    /** 库存流水（采购读 stock_moves，销售从 order_items 反推） */
+    @GET("api/stock-moves")
+    suspend fun stockMoves(@Query("product_id") productId: Int? = null): List<StockMove>
+
+    @GET("api/purchases")
+    suspend fun purchases(): List<PurchaseOrder>
+
+    /** 新建采购单（建单即入库） */
+    @POST("api/purchases")
+    suspend fun createPurchase(@Body b: CreatePurchaseRequest): PurchaseCreated
+
+    @GET("api/purchases/{id}")
+    suspend fun purchaseDetail(@Path("id") id: Int): PurchaseOrderDetail
+
+    /** 作废采购单（回退库存） */
+    @DELETE("api/purchases/{id}")
+    suspend fun voidPurchase(@Path("id") id: Int): OkResponse
 }
 
 // ---------- 客户端单例 ----------
