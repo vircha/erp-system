@@ -283,7 +283,10 @@ data class BookSwitchResponse(val ok: Boolean = false, val book: Book? = null, @
 data class UpdateInfo(
     @SerializedName("versionCode") val versionCode: Int = 0,
     @SerializedName("versionName") val versionName: String = "",
+    // 🔴 v5.7.3：服务器端 url 现在是**永久短链** /downloads/apk（永不变、永远指向最新版）。
+    //    r2Url 是 R2 预签名直链（服务器 302 目标），本 App 不直接用它。
     val url: String = "",
+    @SerializedName("r2Url") val r2Url: String = "",
     val desc: String = "",
     val force: Boolean = false
 )

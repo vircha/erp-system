@@ -2,6 +2,127 @@
 
 > 本文件由 AI 每次改动后自动追加，倒序排列（最新在最上）。
 
+## 2026-10-23 — v5.7.3：根治「移动版 App 里点浏览器下载，下到的是旧版本」
+
+### 经理需求原文
+> `检查所有移动版下载的连接  是否都是最新的  现在移动版从浏览器打开下载的连接是旧的`
+> `1我说的是移动版app   有个按钮是从浏览器下载 这里下载的是旧版本`
+
+### 一、根因（实测定位，非猜测）
+
+**不在服务器文件，而在 App 内存里那条被长期复用的 `updateInfo.url`。**
+
+```
+SettingsViewModel.checkUpdate()  →  Updater.check() 抓一次 update.json
+                                →  updateInfo = info（存进 ViewModel 的 mutableStateOf）
+SettingsScreen「用浏览器下载（备用）」→  vm.updateInfo?.url   ← 长期复用这个快照
+```
+
+旧结构里 `update.json.url` = **带版本号的 R2 预签名直链**：
+
+```
+https://…<r2-endpoint>/erp-apk/HePingERP-v5.7.1-release.apk?X-Amz-Date=…&X-Amz-Signature=…
+                                    ↑ 对象名带版本号 → 永久指向抓取那一刻的包
+```
+
+该快照一旦抓取就**冻结在 App 进程里**，服务器后续发多少版都无效。
+
+**实测旧直链状态（今天）：**
+
+| 旧直链 | HTTP | 说明 |
+|---|---|---|
+| v5.7.1（20261022 签名） | **403** | 旧包已被删 |
+| v5.7.2（20261022 签名） | **200** | 签名未过期，一直能下 |
+
+清理之前 v5.7.1 那条是 200 → **静默下到旧版**，正是经理看到的现象。
+
+### 二、顺带挖出的第二个隐藏故障：R2 对象 Content-Type
+
+- R2 上 `HePingERP-v5.7.2-release.apk` 的 `Content-Type: text/plain;charset=UTF-8`
+- 后果：浏览器打开短链会把 APK **当文本渲染**（一片乱码），而不是下载 → **「用浏览器下载（备用）」按钮本来就是坏的**
+- App 内 HttpURLConnection 自己写文件不受影响，所以之前排查没暴露
+- 修复：`aws s3api put-object --content-type application/vnd.android.package-archive` 重传
+  - 🔴 `rclone copyto --header-upload` / `rcat --header-upload` 对 R2 **无效**（文件已存在时直接跳过，Transferred 0 B）
+  - 🔴 `aws s3api copy-object --metadata-directive REPLACE` rc=0 但 Content-Type 没变（旧签名缓存误判）
+  - ✅ 只有 `put-object --body` 一次成功
+  - 🔴 `curl -sI`（HEAD）查 Content-Type 会误判 → 必须用 `aws s3api head-object` + `curl -r 0-1`（Range GET）双验
+
+### 三、改造：update.json 结构（三个脚本必须一致）
+
+```json
+{
+  "versionCode": 61,
+  "versionName": "5.7.3",
+  "url":    "https://erp.example.com/downloads/apk",   ← 永久短链，永不变
+  "r2Url":  "https://…r2…/HePingERP-v5.7.3-release.apk?X-Amz-…",  ← 预签名直链
+  "desc":   "原生版 v5.7.3：…",
+  "size":   22878691
+}
+```
+
+- `url` → App「用浏览器下载」+ 网页版下载按钮 → **永远指向最新版**
+- `r2Url` → 只给 `server.js` 的 `redirectApk()` 作 302 目标，cron 每 6h 续签
+- 老版 App 的 Gson 会**忽略未知的 `r2Url` 字段**，不会解析失败
+
+### 四、具体改动
+
+**服务端 `server.js`**
+- MIME 表补 `.apk` → `application/vnd.android.package-archive`
+- `redirectApk()` 改读 `j.r2Url || j.url`，并加**自环保护**（绝不 302 回短链自己，否则浏览器无限重定向）
+- 302 带 `Cache-Control: no-store`
+
+**三个服务器脚本职责分离**
+
+| 脚本 | 职责 | 触发 |
+|---|---|---|
+| `refresh_apk_url.sh` | **只续签**：解析 APK 名 → 重签 → **只替换 `r2Url` + `size`**，绝不碰 `versionCode/versionName/desc/url` | cron 每 6h |
+| `_release_apk.sh <ver> <vc> [desc]` | **升版本**：校验 APK（服务器+R2）→ 校验/修正 R2 Content-Type → 写 update.json → 调 cleanup → 验证 | 人工发版 |
+| `cleanup_old_apks.sh` | 只保留当前最新版：备份 → `rclone lsf` 列清单 → 逐个 `deletefile` | 发版后 |
+
+🔴 **新铁律**：三个脚本解析「当前保留哪个 APK」必须**优先读 `r2Url`** —— 新结构里 `url` 是短链，读 `url` 的 basename 只会得到 `"apk"` → 会把当前版本也删掉！
+
+**手机版源码（`android-native`）**
+- `SettingsScreen.kt`：新增 `APK_SHORT_URL = BuildConfig.API_BASE + "/downloads/apk"`，「用浏览器下载（备用）」按钮直接用短链
+- `SettingsViewModel.kt`：`doUpdate()` 里 `Updater.download(ctx, info.url, …)` → 改用 `APK_SHORT_URL`（短链），`Updater.download` 已显式 `instanceFollowRedirects = true` 会跟 302
+- `data/Models.kt`：`UpdateInfo` 新增 `@SerializedName("r2Url") val r2Url: String = ""`
+- `app/build.gradle`：`versionCode 60 → 61`、`versionName "5.7.2" → "5.7.3"`
+
+### 五、发版验证（全部实测通过）
+
+```
+构建            BUILD SUCCESSFUL（3m54s），R8 + shrinkResources
+版本号          aapt badging → versionCode='61' versionName='5.7.3'
+R8 ①           无 missing_rules.txt
+R8 ②           mapping 反查 data 包全部类名原样保留（Account/Customer/UpdateInfo/…）
+R8 ③           证书 SHA-256 = 4c4229b9…5957，与 keystore 及上一版一致
+dex 校验        classes2.dex 内含 "/downloads/apk" 与 "r2Url"
+短链            302 → R2 v5.7.3
+R2 Content-Type application/vnd.android.package-archive
+旧包直链        v5.7.0 / v5.7.1 / v5.7.2 全 404
+cron 实跑       versionCode 仍 61、url 仍短链、r2Url 签名日期刷新
+cleanup 实跑    只保留 v5.7.3
+```
+
+### 六、对经理手机上那个旧版 App 的效果
+
+- 旧版 App 内存里那条 `updateInfo.url` **仍是他上次 check 时抓的旧 R2 直链**（内存快照，服务端改不了）
+- ✅ 但**只要点一次「检查更新」**，就会抓到新的短链 → 此后永远最新版
+- ✅ 服务端已把旧包全删（旧直链 403/404），不会再「静默下到旧版」
+- ✅ 升级到 v5.7.3 后，两条按钮（应用内下载 / 浏览器下载）都无条件走短链，无需手动点检查更新
+
+### 七、被排除的假设（全部实测）
+
+| 假设 | 实测结果 |
+|---|---|
+| 服务器 update.json 指错版本 | ❌ 一直指 v5.7.2/VC=60 |
+| R2 对象内容是旧包 | ❌ 服务器本地/R2/短链三处 sha256 一致 |
+| App 里硬编码旧包直链 | ❌ 历史 APK dex 只有 3 个字符串，无旧包名 |
+| API_BASE 是旧 IP | ❌ 全是 `https://erp.example.com` |
+| 老版 App 不跟随 302 | ❌ `instanceFollowRedirects=true` 从 v5.0 初始 commit 就有 |
+| 8801 端口是 ERP 入口 | ❌ 是 aimemo 另一应用 |
+| nginx 缓存了 302/update.json | ❌ Location 稳定、ETag 实时、no-store/no-cache 生效 |
+| R2 Content-Type 正确 | ❌ **是 `text/plain` → 浏览器当文本渲染（第二个真实故障）** |
+
 ## 2026-10-22 — v5.7.2：网页版 + 手机版加载速度优化
 
 ### 经理需求原文

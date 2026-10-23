@@ -46,6 +46,20 @@ import kotlinx.coroutines.launch
  */
 val WEB_URL: String = BuildConfig.API_BASE
 
+/**
+ * v5.7.3：APK 下载**永久短链**（2026-10-23 经理「移动版 App 里点浏览器下载，下到的是旧版本」根治）。
+ *
+ * 🔴🔴 为什么「用浏览器下载」不能用 updateInfo.url：
+ *   updateInfo 是 App 启动/点「检查更新」时抓一次就长期驻留的快照，
+ *   而旧结构里它指向的是**带版本号的 R2 预签名直链**
+ *   （.../HePingERP-v5.6.6-release.apk?X-Amz-Signature=…）
+ *   → 那条链接**永久指向抓取那一刻的旧包**，服务器后来再发多少版都无效。
+ *   员工手机上点它，下到的就是几个月前的旧版本。
+ *
+ * ✅ 改成短链后：服务器每次请求都实时 302 到**当时的最新版**，永不失效、永不指旧。
+ */
+val APK_SHORT_URL: String = BuildConfig.API_BASE + "/downloads/apk"
+
 @Composable
 fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
     val ctx = LocalContext.current
@@ -277,12 +291,11 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
                 Text("更新说明：$it", style = MaterialTheme.typography.labelSmall)
             }
             // 备用通道：直接用系统浏览器下载 APK（大包或应用内下载异常时可用）
-            vm.updateInfo?.url?.let { url ->
-                TextButton(onClick = {
-                    ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                }) {
-                    Text("用浏览器下载（备用）", fontSize = 12.sp)
-                }
+            // 🔴 v5.7.3：用**永久短链**，不用 updateInfo.url（那个是快照，可能指向旧包）
+            TextButton(onClick = {
+                ctx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(APK_SHORT_URL)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }) {
+                Text("用浏览器下载（备用）", fontSize = 12.sp)
             }
             Spacer(Modifier.height(4.dp))
             var showCrash by remember { mutableStateOf(false) }

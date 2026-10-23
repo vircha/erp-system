@@ -95,9 +95,14 @@ class SettingsViewModel : ViewModel() {
                     return@launch
                 }
                 log("准备下载 v${info.versionName}")
+                // 🔴 v5.7.3：一律走**永久短链**（/downloads/apk），不用 info.url。
+                //    info.url 是 App 抓取 update.json 那一刻的快照，旧结构里它指向
+                //    带版本号的 R2 直链 → 永久指向旧包（经理反馈「下到旧版本」的根因）。
+                //    短链由服务器实时 302 到当时最新版；Updater.download 已显式
+                //    instanceFollowRedirects = true，会跟随 302 拿到最终响应。
                 val apk = withContext(Dispatchers.IO) {
                     Updater.download(
-                        ctx, info.url,
+                        ctx, com.heping.erpnative.ui.main.APK_SHORT_URL,
                         log = { line -> log(line) },
                         onProgress = { done, total ->
                             dlBytes = done; dlTotal = total
