@@ -110,3 +110,7 @@ build.local.env
 /dist/
 /android-native/local.properties
 /android-native/keystore.properties
+
+*.bak
+*.bak_*
+*.bak_before_dedup
