@@ -10,6 +10,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.heping.erpnative.data.SessionStore
 import com.heping.erpnative.data.ErpClient
+import com.heping.erpnative.data.SyncManager
+import com.heping.erpnative.data.logd
 import com.heping.erpnative.ui.login.LoginScreen
 import com.heping.erpnative.ui.main.MainScreen
 
@@ -57,6 +59,14 @@ fun AppNav() {
         composable("main") {
             // 进系统时才预取打印资料（账套可能刚在面板上切过）
             LaunchedEffect(Unit) { prefetchPrintMeta() }
+            // 🔴🔴 v5.7.4 离线输单：进系统后立即同步一次本地排队单据。
+            //   （App 启动时可能还没登录成功，token 拿不到 → 放这里）
+            LaunchedEffect(Unit) {
+                try {
+                    val r = SyncManager.sync(SessionStore.appContext)
+                    if (r.ok > 0) logd("Sync", "进系统已同步 ${r.ok} 单")
+                } catch (_: Exception) { }
+            }
             MainScreen(onLogout = {
                 nav.navigate("login") { popUpTo("main") { inclusive = true } }
             })

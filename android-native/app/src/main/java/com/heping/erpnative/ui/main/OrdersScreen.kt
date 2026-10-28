@@ -47,6 +47,9 @@ fun OrdersScreen(
     var pickerTarget by remember { mutableStateOf<Int?>(null) }
     var showReturns by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<com.heping.erpnative.data.Order?>(null) }
+    // 🔴 2026-10-28：左右滑「同时只展开一行」——滑开新行时旧行自动收回，
+    //    避免多行同时露出按钮导致「关不掉」的错觉（经理：滑回正常显示很难）。
+    var expandedOrderId by remember { mutableStateOf<Int?>(null) }
     val canDelete = SessionStore.can("order.delete")
     val canEdit = SessionStore.can("order.edit")
     val dateState = rememberDatePickerState(initialSelectedDateMillis = System.currentTimeMillis())
@@ -294,6 +297,15 @@ fun OrdersScreen(
                             }
                         },
                         modifier = Modifier.padding(vertical = 4.dp),
+                        // 🔴 互斥：别的行展开时本行强制收回
+                        forceCollapsed = (expandedOrderId != null && expandedOrderId != o.id),
+                        onExpandedChange = { exp ->
+                            expandedOrderId = when {
+                                exp -> o.id
+                                expandedOrderId == o.id -> null
+                                else -> expandedOrderId
+                            }
+                        },
                         onClick = { vm.loadDetail(o.id) }
                     ) {
                         // 🔴 2026-10-20 客户自助单：紫色左侧竖条 + badge，

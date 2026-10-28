@@ -8,10 +8,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.heping.erpnative.data.NetState
 import com.heping.erpnative.data.SessionStore
+import com.heping.erpnative.data.SyncManager
 import com.heping.erpnative.ui.components.toast
 import com.heping.erpnative.vm.*
 import com.heping.erpnative.vm.PurchaseViewModel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
@@ -87,6 +90,19 @@ fun MainScreen(onLogout: () -> Unit) {
         }
     }
 
+    // 🔴 v5.7.4 离线输单：网络恢复时把排队单传上去，并刷新开单页的「待上传」角标
+    LaunchedEffect(Unit) {
+        NetState.online.collect { online ->
+            if (online) {
+                try {
+                    val r = SyncManager.sync(ctx)
+                    if (r.ok > 0) toast(ctx, "已自动上传 ${r.ok} 单离线单据", long = true)
+                } catch (_: Exception) { }
+            }
+            saleVm.refreshPendingCount()
+        }
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
@@ -103,7 +119,11 @@ fun MainScreen(onLogout: () -> Unit) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
-                Tab.Sale -> SaleScreen(vm = saleVm, onEditingDone = leaveSale)
+                Tab.Sale -> {
+                    // 进开单页时刷新待同步数量（离线条数可能刚被别的入口改过）
+                    LaunchedEffect(Unit) { saleVm.refreshPendingCount() }
+                    SaleScreen(vm = saleVm, onEditingDone = leaveSale)
+                }
                 Tab.Orders -> OrdersScreen(vm = ordersVm, onEditOrder = gotoSaleForEdit)
                 Tab.Customers -> CustomersScreen(vm = customersVm, arVm = arVm)
                 Tab.Products -> ProductsScreen(vm = productsVm)

@@ -396,6 +396,25 @@ interface ErpApi {
     @POST("api/books/switch")
     suspend fun switchBook(@Body b: Map<String, Int>): BookSwitchResponse
 
+    // ---------- 账套管理（v5.7.4：手机端补齐网页版已有的账套增/改） ----------
+    // 🔴 全部仅 boss 可用，服务端会再校验一次；前端也按角色隐藏入口。
+    @POST("api/books")
+    suspend fun createBook(@Body b: Map<String, String>): BookCreateResponse
+
+    /** 加入口令：传空串 = 清除口令（网页版「清除」按钮走同一个接口） */
+    @PUT("api/books/join-password")
+    suspend fun setJoinPassword(@Body b: Map<String, String>): JoinPwdResponse
+
+    @GET("api/books/invite")
+    suspend fun bookInvite(): BookInviteResponse
+
+    @POST("api/books/invite/reset")
+    suspend fun resetInvite(): InviteResetResponse
+
+    /** 删除账套：需传 confirm_name = 账套名；服务端会级联清空该账套全部数据 */
+    @POST("api/books/delete")
+    suspend fun deleteBook(@Body b: Map<String, String>): BookDeleteResponse
+
     // ---------- 采购与库存（v5.6.9；管家婆「以销定购」）----------
     // 🔴 口径：建议采购量 = max(0, 净销售数量 - 已采购入库数量)，采购入库后推导库存 = 0。
     //    与网页端/服务端完全一致，手机端只是同一套接口的另一张皮。

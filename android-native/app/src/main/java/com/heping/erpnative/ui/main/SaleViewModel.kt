@@ -17,6 +17,7 @@ import com.heping.erpnative.device.PrintResult
 import com.heping.erpnative.ocr.OcrTable
 import com.heping.erpnative.ocr.TableFile
 import com.heping.erpnative.ocr.TableOcr
+import com.google.gson.Gson
 import com.heping.erpnative.ui.components.daysAgo
 import com.heping.erpnative.ui.components.nowStr
 import com.heping.erpnative.ui.components.todayStr
@@ -53,6 +54,9 @@ data class CartLine(
 }
 
 class SaleViewModel : ViewModel() {
+    /** 🔴 v5.7.4 离线队列：把下单请求原样存成 JSON，联网后原样重放 */
+    private val gson = Gson()
+
     var customers by mutableStateOf<List<Customer>>(emptyList())
     var products by mutableStateOf<List<Product>>(emptyList())
     var selectedCustomer by mutableStateOf<Customer?>(null)
@@ -376,6 +380,12 @@ class SaleViewModel : ViewModel() {
      *
      * 编辑模式（editingOrderId != null）走 PUT /api/orders/{id}：整单替换明细，
      * 后端会回补旧明细库存再扣新的，并重算应收。
+     *
+     * 🔴🔴 v5.7.4 离线输单（经理 2026-10-28：「移动版支持离网输单」）：
+     *   断网时不再「提交失败、订单丢失」，而是**存进本地队列**，联网后自动上传。
+     *   - 离线单带 client_id（UUID）作为幂等键 → 重试不会重复建单、重复扣库存；
+     *   - 编辑已有单**不能**离线（改单要服务端配合，冲突风险大）→ 明确提示；
+     *   - 退货单也支持离线（同样是新建一张单，服务端按 type='return' 处理）。
      */
     suspend fun submit(): Boolean {
         val ret = isReturnMode
@@ -384,33 +394,37 @@ class SaleViewModel : ViewModel() {
             error = if (ret) "请先选择退货客户" else "请先选择客户"; return false
         }
         if (cart.isEmpty()) { error = if (ret) "请添加退货商品" else "请添加商品"; return false }
+        // 🔴 这三个变量必须在 try **外面**声明：catch 里的离线入队逻辑要用到它们。
+        //   （写在 try 内部 → catch 块看不到 → 编译不过）
+        // 🔴 2026-10-20 客户账号：整单折扣强制 1（服务端 _forceStorePrice 也会再强制一次，
+        //    这里只是不把「折扣由商家定」的东西发出去）。UI 已改成只读，正常走不到非 1 的分支，
+        //    但仍显式兜住 —— 免得以后有人把只读去掉就静默把折扣传出去了。
+        val d = if (SessionStore.isCustomer) 1.0
+                else (discountInput.toDoubleOrNull()?.coerceIn(0.1, 1.0) ?: 1.0)
+        // 🔴 幂等键：每次提交一单生成一个 UUID。离线时它也是本地队列的主键。
+        val clientId = java.util.UUID.randomUUID().toString()
+        val req = CreateOrderRequest(
+            customerId = cust.id,
+            // price 传折前单价 + 带上该行 discount，服务端会算出成交价 = price × discount；
+            // 折扣为 1 的行也照传（值为 1），这样「有的有折扣有的没有」能被正确记忆。
+            items = cart.map {
+                CreateOrderItem(
+                    productId = it.product.id,
+                    qty = it.qty,
+                    price = it.price,
+                    discount = it.discount
+                )
+            },
+            discount = if (d != 1.0) d else null,
+            // 退货单的状态由服务端强制为 'returned'，这里不传
+            status = if (editId != null) editingStatus else (if (ret) null else "paid"),
+            orderDate = if (editId != null) editingOrderDate else null,
+            type = if (ret) "return" else null,
+            clientOrderId = clientId
+        )
         return try {
             submitting = true
             error = null
-            // 🔴 2026-10-20 客户账号：整单折扣强制 1（服务端 _forceStorePrice 也会再强制一次，
-            //    这里只是不把「折扣由商家定」的东西发出去）。UI 已改成只读，正常走不到非 1 的分支，
-            //    但仍显式兜住 —— 免得以后有人把只读去掉就静默把折扣传出去了。
-            val d = if (SessionStore.isCustomer) 1.0
-                    else (discountInput.toDoubleOrNull()?.coerceIn(0.1, 1.0) ?: 1.0)
-
-            val req = CreateOrderRequest(
-                customerId = cust.id,
-                // price 传折前单价 + 带上该行 discount，服务端会算出成交价 = price × discount；
-                // 折扣为 1 的行也照传（值为 1），这样「有的有折扣有的没有」能被正确记忆。
-                items = cart.map {
-                    CreateOrderItem(
-                        productId = it.product.id,
-                        qty = it.qty,
-                        price = it.price,
-                        discount = it.discount
-                    )
-                },
-                discount = if (d != 1.0) d else null,
-                // 退货单的状态由服务端强制为 'returned'，这里不传
-                status = if (editId != null) editingStatus else (if (ret) null else "paid"),
-                orderDate = if (editId != null) editingOrderDate else null,
-                type = if (ret) "return" else null
-            )
             val r = if (editId != null) ErpClient.api.updateOrder(editId, req) else ErpClient.api.createOrder(req)
             lastResult = r
             // 新单成功 → 清掉上一单的打印提示，别让新单弹窗里挂着旧提示
@@ -425,9 +439,79 @@ class SaleViewModel : ViewModel() {
             }
             true
         } catch (e: Exception) {
+            // 🔴🔴 断网 → 存本地队列（订单不丢），而不是直接失败
+            if (isNetworkError(e)) {
+                if (editId != null) {
+                    // 改已有单不能离线：老单的明细/金额要跟服务端对齐，盲改会冲突
+                    error = "当前无网络，修改已有订单需要联网（请恢复网络后重试）"
+                    return false
+                }
+                if (enqueueOffline(req, cust)) {
+                    offline = true
+                    // 离线单没有服务端单号 → lastResult 造一个本地占位，让「打印/查看」有东西可显示
+                    val p = payable()
+                    val signed = if (ret) -p else p
+                    lastResult = OrderCreated(
+                        orderId = 0,
+                        orderNo = "待同步-${clientId.take(8)}",
+                        total = signed,
+                        discount = d,
+                        payable = signed,
+                        type = if (ret) "return" else null,
+                        totalSigned = signed,
+                        payableSigned = signed
+                    )
+                    resetPrintHint()
+                    // 离线单同样清购物车（单已经收下了，不能重复录）
+                    clearCart()
+                    selectedCustomer = null
+                    priceMap = emptyMap(); itemDiscountMap = emptyMap()
+                    error = null
+                    offlineNotice = "当前无网络，单据已保存在手机本地，联网后会自动上传"
+                    refreshPendingCount()
+                    return true
+                } else {
+                    error = "当前无网络，且本地保存失败：${e.userMessage()}"
+                    return false
+                }
+            }
             error = e.userMessage()
             false
         } finally { submitting = false }
+    }
+
+    /**
+     * 离线单入队。返回是否成功。
+     * 🔴 存的是**完整下单请求 JSON** —— 联网后原样重放，服务端算价口径与在线时完全一致。
+     */
+    private fun enqueueOffline(req: CreateOrderRequest, cust: Customer): Boolean {
+        return try {
+            val db = LocalOrderDb(SessionStore.appContext)
+            db.enqueue(
+                clientId = req.clientOrderId ?: java.util.UUID.randomUUID().toString(),
+                payload = gson.toJson(req),
+                customerName = cust.name,
+                amount = payable()
+            )
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 🔴 离线提示（一次性，UI 看完可清） */
+    var offlineNotice by mutableStateOf<String?>(null)
+    fun clearOfflineNotice() { offlineNotice = null }
+
+    /** 🔴 待同步数量（角标） */
+    var pendingSyncCount by mutableStateOf(0)
+        private set
+
+    /** 刷新待同步数量 */
+    fun refreshPendingCount() {
+        viewModelScope.launch {
+            pendingSyncCount = SyncManager.pendingCount(SessionStore.appContext)
+        }
     }
 
     /**

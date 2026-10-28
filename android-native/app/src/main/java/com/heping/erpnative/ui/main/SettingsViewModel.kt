@@ -8,6 +8,7 @@ import com.heping.erpnative.data.userMessage
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.heping.erpnative.data.ErpClient
+import com.heping.erpnative.data.BookInviteResponse
 import com.heping.erpnative.data.SessionStore
 import com.heping.erpnative.data.UpdateInfo
 import com.heping.erpnative.device.BtDevice
@@ -248,6 +249,117 @@ class SettingsViewModel : ViewModel() {
             } catch (e: Exception) {
                 onDone(false, e.userMessage())
             } finally { unbinding = false }
+        }
+    }
+
+    // ================= 账套管理（v5.7.4） =================
+    // 🔴 经理 2026-10-28：「移动端没有账套添加或修改功能」→ 手机端补齐网页版已有的
+    //    账套增改能力：新建账套 / 加入口令 / 邀请码 / 删除账套。
+    //    服务端这些接口全部仅 boss 可用（服务端会再校验一次）。
+
+    var bookBusy by mutableStateOf(false)
+    var bookManageMsg by mutableStateOf<String?>(null)
+    var inviteInfo by mutableStateOf<BookInviteResponse?>(null)
+
+    /** 新建账套。成功后刷新账套列表（服务端已把新账套挂到当前账号下） */
+    fun createBook(name: String, onDone: (Boolean, String?) -> Unit) {
+        if (bookBusy) return
+        viewModelScope.launch {
+            bookBusy = true; bookManageMsg = null
+            try {
+                val r = ErpClient.api.createBook(mapOf("name" to name.trim()))
+                loadBooks()
+                bookManageMsg = "已创建账套「${r.name.ifBlank { name.trim() }}」"
+                onDone(true, null)
+            } catch (e: Exception) {
+                val m = e.userMessage()
+                bookManageMsg = "创建失败：$m"
+                onDone(false, m)
+            } finally { bookBusy = false }
+        }
+    }
+
+    /** 设置 / 清除加入口令。clear=true 时传空串（服务端语义 = 清除） */
+    fun setJoinPassword(pwd: String, clear: Boolean, onDone: (Boolean, String?) -> Unit) {
+        if (bookBusy) return
+        viewModelScope.launch {
+            bookBusy = true; bookManageMsg = null
+            try {
+                val r = ErpClient.api.setJoinPassword(mapOf("join_password" to if (clear) "" else pwd.trim()))
+                bookManageMsg = if (clear) "加入口令已清除" else "加入口令已保存（加密存储，不可查看）"
+                // 刷新邀请码面板里的「已设置/未设置」状态
+                runCatching { inviteInfo = ErpClient.api.bookInvite() }
+                onDone(true, null)
+            } catch (e: Exception) {
+                val m = e.userMessage()
+                bookManageMsg = "操作失败：$m"
+                onDone(false, m)
+            } finally { bookBusy = false }
+        }
+    }
+
+    /** 取当前账套邀请码（供「邀请员工」面板展示 + 一键复制） */
+    fun loadInvite(onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            try {
+                inviteInfo = ErpClient.api.bookInvite()
+                onDone(true)
+            } catch (e: Exception) {
+                bookManageMsg = "获取邀请码失败：${e.userMessage()}"
+                onDone(false)
+            }
+        }
+    }
+
+    /** 重置邀请码：旧码立即失效 */
+    fun resetInvite(onDone: (Boolean) -> Unit) {
+        if (bookBusy) return
+        viewModelScope.launch {
+            bookBusy = true
+            try {
+                val r = ErpClient.api.resetInvite()
+                inviteInfo = (inviteInfo ?: BookInviteResponse()).copy(inviteCode = r.inviteCode)
+                bookManageMsg = "邀请码已重置，旧码立即失效"
+                onDone(true)
+            } catch (e: Exception) {
+                bookManageMsg = "重置失败：${e.userMessage()}"
+                onDone(false)
+            } finally { bookBusy = false }
+        }
+    }
+
+    /**
+     * 删除当前账套（危险操作，需输入账套名确认）。
+     * 服务端语义：
+     *  - 还有其他账套 → 自动切到第一个，返回 switched=true + 新账套
+     *  - 删的是最后一个 → 注销会话，返回 logged_out=true → 前端要跳登录页
+     */
+    fun deleteBook(confirmName: String, onDone: (Boolean, Boolean) -> Unit) {
+        if (bookBusy) return
+        viewModelScope.launch {
+            bookBusy = true; bookManageMsg = null
+            try {
+                val r = ErpClient.api.deleteBook(mapOf("confirm_name" to confirmName))
+                if (r.loggedOut) {
+                    SessionStore.logoutKeepDevice()
+                    onDone(true, true)
+                } else if (r.book != null) {
+                    val m = ErpClient.api.me()
+                    SessionStore.saveProfile(
+                        m.role, m.perms, r.book.id, r.book.name,
+                        r.shopName.ifBlank { m.shopName }, m.customerId
+                    )
+                    loadBooks()
+                    bookManageMsg = "账套已删除，已切换到「${r.book.name}」"
+                    onDone(true, false)
+                } else {
+                    onDone(false, false)
+                }
+            } catch (e: Exception) {
+                val m = e.userMessage()
+                bookManageMsg = "删除失败：$m"
+                onDone(false, false)
+            } finally { bookBusy = false }
         }
     }
 }

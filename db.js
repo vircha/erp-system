@@ -465,6 +465,14 @@ try {
   ensureColumn('orders', 'placed_by', 'placed_by INTEGER');
   ensureColumn('orders', 'placed_by_role', 'placed_by_role TEXT');
   ensureColumn('orders', 'placed_by_name', 'placed_by_name TEXT');
+  // 🔴🔴 2026-10-28 移动端离线开单（v5.7.4）：客户端生成 client_order_id（UUID）随单提交，
+  //   服务端据此做**幂等去重** —— 离线单联网后重试提交，绝不能重复建单、重复扣库存。
+  //   ⚠️ SQLite 的 ALTER TABLE ADD COLUMN 不接受 UNIQUE 约束 → 列普通列 + 单独建部分唯一索引。
+  //   部分索引里的 WHERE 条件保证老单（NULL/空串）互不影响。
+  ensureColumn('orders', 'client_order_id', 'client_order_id TEXT');
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_id ON orders(client_order_id) WHERE client_order_id IS NOT NULL AND client_order_id <> ''");
+  } catch (e) { console.error('migrate idx_orders_client_id:', e.message); }
   ['customers', 'products', 'inventory', 'orders', 'order_items', 'price_systems', 'deliveries', 'delivery_items', 'customer_prices', 'customer_discounts'].forEach(t => ensureColumn(t, 'book_id', 'book_id INTEGER DEFAULT 1'));
 } catch (e) { console.error('migrate:', e.message); }
 

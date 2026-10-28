@@ -284,7 +284,7 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                 else -> "开单"
             }
         )
-        OfflineBanner(vm.offline)
+        OfflineBanner(vm.offline, vm.pendingSyncCount)
         // 编辑订单提示条：说清能干什么 + 给一个放弃修改的出口
         if (isEditing) {
             Surface(
@@ -805,6 +805,11 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                                 toast(ctx, "已保存修改 $editingNo，单号不变")
                                 showSuccess = false
                                 onEditingDone()
+                            } else if (vm.offlineNotice != null) {
+                                // 🔴 v5.7.4 离线保存成功：明确告诉用户「已存本地、联网自动传」
+                                toast(ctx, vm.offlineNotice!!, long = true)
+                                vm.clearOfflineNotice()
+                                showSuccess = true
                             } else {
                                 showSuccess = true
                             }

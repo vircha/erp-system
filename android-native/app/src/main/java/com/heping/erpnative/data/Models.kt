@@ -191,7 +191,11 @@ data class CreateOrderRequest(
     // 单据类型：null/sale=销售单；return=销售退货单（管家婆式：手工录品，服务端存负数并回补库存）
     val type: String? = null,
     // 可选关联的原销售单号（仅用于追溯，允许为空）
-    @SerializedName("return_of") val returnOf: Int? = null
+    @SerializedName("return_of") val returnOf: Int? = null,
+    // 🔴🔴 v5.7.4 离线开单幂等键：客户端生成的 UUID。
+    //   服务端按它去重 —— 离线单联网后即使重试多次，也只会建出一张单（不重复扣库存）。
+    //   普通在线单留空即可（服务端走老逻辑，不进唯一索引）。
+    @SerializedName("client_order_id") val clientOrderId: String? = null
 )
 
 data class OrderCreated(
@@ -278,6 +282,31 @@ data class IdResponse(val id: Int = 0)
 data class OkResponse(val ok: Boolean = false, val removed: Int = 0)
 data class SettingsOk(val ok: Boolean = false, @SerializedName("shop_name") val shopName: String = "")
 data class BookSwitchResponse(val ok: Boolean = false, val book: Book? = null, @SerializedName("shop_name") val shopName: String = "")
+
+// ---------- 账套管理（v5.7.4：手机端补齐网页版已有的账套增改功能） ----------
+data class BookCreateResponse(val id: Int = 0, val name: String = "")
+data class JoinPwdResponse(
+    val ok: Boolean = false,
+    @SerializedName("join_password_set") val joinPasswordSet: Boolean = false
+)
+data class BookInviteResponse(
+    @SerializedName("book_id") val bookId: Int = 0,
+    @SerializedName("book_name") val bookName: String = "",
+    @SerializedName("invite_code") val inviteCode: String = "",
+    @SerializedName("has_password") val hasPassword: Boolean = false
+)
+data class InviteResetResponse(
+    val ok: Boolean = false,
+    @SerializedName("invite_code") val inviteCode: String = ""
+)
+data class BookDeleteResponse(
+    val ok: Boolean = false,
+    val switched: Boolean = false,
+    val book: Book? = null,
+    val shopName: String = "",
+    /** 🔴 服务端删掉最后一个账套时直接注销会话 → 前端要跳登录页 */
+    @SerializedName("logged_out") val loggedOut: Boolean = false
+)
 
 // ---------- 在线更新（update.json） ----------
 data class UpdateInfo(

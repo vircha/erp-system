@@ -22,7 +22,9 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon'
+  '.ico': 'image/x-icon',
+  // 🔴 2026-10-23：APK 必须给正确的 MIME，否则浏览器可能当文本渲染（一片乱码）
+  '.apk': 'application/vnd.android.package-archive'
 };
 
 // 构建版本戳：以 public/js/app.js 的修改时间为准，部署后随 erp.service 重启刷新；
@@ -1642,6 +1644,28 @@ async function handleApi(req, res, u) {
   if (p === '/api/orders' && method === 'POST') {
     if (!need('sale.create')) return;
     const b = await getBody(req);
+    // 🔴🔴 2026-10-28 移动端离线开单（v5.7.4）：**幂等去重**。
+    //   离线时手机把单子存在本地队列，联网后重试提交 —— 网络抖动时同一张单可能被提交多次。
+    //   没有幂等 = 重复建单 + 重复扣库存 + 报表销量翻倍。所以客户端必须带 client_order_id，
+    //   服务端据此判断「这张单我已经收过了」→ 直接返回原单，不再插入、不再动库存。
+    //   ⚠️ 归属校验：命中的单必须是自己下的（placed_by = 当前账号），
+    //      否则改一下 client_order_id 就能把别人的单据信息套出来。
+    const _cid = String(b.client_order_id || '').trim();
+    if (_cid) {
+      const _ex = db.prepare('SELECT id,order_no,total,payable,discount,status,placed_by FROM orders WHERE book_id=? AND client_order_id=?').get(bookId, _cid);
+      if (_ex) {
+        const _me = (ctx && ctx.account) ? Number(ctx.account.id) : 0;
+        if (_ex.placed_by != null && Number(_ex.placed_by) !== _me) {
+          return sendJSON(res, 403, { error: '该单据编号已被其他账号占用' });
+        }
+        const _isRet = _ex.status === 'returned';
+        return sendJSON(res, 200, {
+          order_id: _ex.id, order_no: _ex.order_no, total: _ex.total,
+          discount: _ex.discount == null ? 1 : _ex.discount, payable: _ex.payable,
+          is_return: _isRet, payable_signed: _ex.payable, duplicate: true
+        });
+      }
+    }
     // 🔴 客户角色：body.customer_id 只在他**被授权的门店集合**里才认，
     //    否则强制回落默认门店 —— 改报文想冒充别家门店下单是不行的。
     //    同时禁止客户提交退货单，并强制整单折扣为 1（折扣只能由商家给）。
@@ -1724,7 +1748,8 @@ async function handleApi(req, res, u) {
       // 🔴 记录「这张单是谁下的」：客户账号下的单在管理界面要有显眼标识，
       //    否则一堆单子里分不清是客户自己下的还是业务员代开的。
       const _acc = ctx && ctx.account ? ctx.account : null;
-      const oi = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,placed_by,placed_by_role,placed_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, order_no, cust.id, cust.name, totalSigned, payableSigned, discount, b.order_date || null, isReturn ? 'returned' : (b.status || 'paid'), b.remark || (isReturn ? '销售退货' : ''), _acc ? _acc.id : null, _acc ? (_acc.role || '') : '', _acc ? (_acc.display_name || _acc.username || '') : '');
+      // 🔴 client_order_id 一并落库（离线同步的幂等凭据）；普通单传空串 → 存 NULL，不进唯一索引。
+      const oi = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,placed_by,placed_by_role,placed_by_name,client_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, order_no, cust.id, cust.name, totalSigned, payableSigned, discount, b.order_date || null, isReturn ? 'returned' : (b.status || 'paid'), b.remark || (isReturn ? '销售退货' : ''), _acc ? _acc.id : null, _acc ? (_acc.role || '') : '', _acc ? (_acc.display_name || _acc.username || '') : '', _cid ? _cid : null);
       orderId = oi.lastInsertRowid;
       for (const L of lines) {
         const sq = L.qty * sign;                                  // 落库数量：退货为负
@@ -1735,6 +1760,19 @@ async function handleApi(req, res, u) {
       }
       db.exec('COMMIT');
     } catch (e) {
+      // 🔴🔴 同一 client_order_id 并发提交 → 撞唯一索引（少见，但真的会出现）。
+      //   直接报 500 会让客户端以为单子没成功 → 重试再提 → 再报错。
+      //   正确做法：回查已存的那张单，返回它。
+      if (_cid && /UNIQUE|constraint/i.test(String((e && e.message) || e))) {
+        const _ex2 = db.prepare('SELECT id,order_no,total,payable,discount,status FROM orders WHERE book_id=? AND client_order_id=?').get(bookId, _cid);
+        if (_ex2) {
+          return sendJSON(res, 200, {
+            order_id: _ex2.id, order_no: _ex2.order_no, total: _ex2.total,
+            discount: _ex2.discount == null ? 1 : _ex2.discount, payable: _ex2.payable,
+            is_return: _ex2.status === 'returned', payable_signed: _ex2.payable, duplicate: true
+          });
+        }
+      }
       // 只有真在事务里才回滚（否则 ROLLBACK 自己抛错会盖掉真实错误）
       try { db.exec('ROLLBACK'); } catch (_) { }
       console.error('createOrder:', (e && e.message) || e);
@@ -3061,10 +3099,43 @@ function serveStatic(req, res, pathname) {
       // 安卓 App(WebView) 直接缓存了 js/app.js，导致改了服务器也看不到更新。
       // 加 ?v=<mtime> 后，每次部署文件变化版本号就变，WebView 必然当新地址重新拉取。
       let html = data.toString('utf8');
-      const mts = (p) => { try { return Math.floor(fs.statSync(path.join(PUBLIC_DIR, p)).mtimeMs); } catch (e) { return Date.now(); } };
-      const av = mts('js/app.js'), cv = mts('css/style.css');
-      html = html.replace(/src="js\/app\.js"/g, 'src="js/app.js?v=' + av + '"')
-                 .replace(/href="css\/style\.css"/g, 'href="css/style.css?v=' + cv + '"');
+      // 🔴 v5.7.2（2026-10-22 经理「优化网页版及手机版加载速度」）：
+      //   版本号从「只注入 app.js + style.css 两个文件的 mtime」→ 改成「**全部 js/css
+      //   都注入，且版本号用文件内容哈希**」。三处收益：
+      //     ① 覆盖全部 7 个 js + 4 个 css（原来有 9 个资源没版本号，每次都要回服务器
+      //        问「有没有新的」，高延迟线路上每个多一个 RTT，白白多花 1~3 秒）；
+      //     ② mtime 只有毫秒精度，同一秒内连续部署两次会撞版本号 → 浏览器把旧版
+      //        永久锁死（曾出现「改了媒体查询但线上仍按旧侧栏宽度渲染」）。内容哈希
+      //        只要有一个字节不同就变，同秒部署也绝不撞车；
+      //     ③ 哈希可以安全配 immutable（nginx 侧 map 已就位），浏览器从此不回源问。
+      //   代价是首次要读一遍文件算哈希 —— 用 mtime+size 做缓存键，文件没动就直接复用。
+      const vhashCache = serveStatic._vh || (serveStatic._vh = new Map());
+      const vhash = (rel) => {
+        try {
+          const fp2 = path.join(PUBLIC_DIR, rel);
+          const st = fs.statSync(fp2);
+          const key = st.mtimeMs + ':' + st.size;
+          const hit = vhashCache.get(rel);
+          if (hit && hit.key === key) return hit.v;
+          const v = crypto.createHash('sha1').update(fs.readFileSync(fp2)).digest('hex').slice(0, 10);
+          vhashCache.set(rel, { key: key, v: v });
+          return v;
+        } catch (e) { return '0'; }
+      };
+      // 一次性给所有 js/css 引用补 ?v=。
+      // 🔴 踩过的坑：第一版写成 `(m, tag, rel) => m + '?v=' + vhash(rel)`，
+      //    而正则的 group0 含**结尾引号** → 结果变成 href="a.css"?v=xxx ，
+      //    ?v= 落在引号外面，HTML 属性破版（浏览器会当畸形属性丢弃）。
+      //    正确做法：**整个属性重建**，?v= 必须落在引号里面。
+      //🔴 还要跳过 HTML 注释：将来有人在注释里写一句「见 href="css/style.css"」，
+      //    就会被无差别注入成 ?v=，把说明文字变成脏数据（虽不致命，但会让注释
+      //    永久显示一个假版本号，且以后 diff 源码时对不上）。
+      //    做法：先把注释整段抠出来占位，替换完再放回去。
+      const comments = [];
+      html = html.replace(/<!--[\s\S]*?-->/g, (m) => { comments.push(m); return '\u0000C' + (comments.length - 1) + '\u0000'; });
+      html = html.replace(/(src|href)="((?:js|css)\/[^"?]+)"/g,
+        (m, tag, rel) => tag + '="' + rel + '?v=' + vhash(rel) + '"');
+      html = html.replace(/\u0000C(\d+)\u0000/g, (m, i) => comments[Number(i)]);
       data = Buffer.from(html, 'utf8');
       cacheCtrl = 'no-store';
     } else {
@@ -3150,10 +3221,24 @@ const requestHandler = async (req, res) => {
 function redirectApk(res) {
   try {
     const j = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, 'downloads/update.json'), 'utf8'));
-    if (!j.url) throw new Error('update.json 无 url');
+    // 🔴🔴 2026-10-23 根治「移动版 App 里点「用浏览器下载」下到的是旧版本」：
+    //   update.json 的 **url 现在是永久短链**（就是本路径 /downloads/apk 自身），
+    //   **r2Url** 才是 R2 预签名直链。两者不可对换！
+    //
+    //   为什么必须改成这样（经理实测定案）：
+    //     App 内部那条 updateInfo.url 是 **App 启动时 check() 抓一次就长期复用** 的，
+    //     而旧结构里它是**带版本号的 R2 直链**（.../HePingERP-v5.6.6-release.apk?X-Amz-Signature=…），
+    //     它会**永久指向发版那一刻的旧包**——服务器后来再发多少版都无效。
+    //     员工手机上点它下到的就是旧版。
+    //   改成短链后，App 里那条 url 永远是 /downloads/apk，
+    //   服务器每次请求都实时 302 到**当时的最新版**，从根上消灭「旧版直链」。
+    let target = j.r2Url || j.url;
+    if (!target) throw new Error('update.json 无 url/r2Url');
+    // 防自环：绝不能 302 回短链自己（否则浏览器无限重定向）
+    if (/\/downloads\/apk(\?|$)/.test(target)) throw new Error('update.json 目标自环');
     // 302 而不是 307：APK 是 GET，302 后浏览器/微信会正常跟随下载
     res.writeHead(302, {
-      Location: j.url,
+      Location: target,
       'Cache-Control': 'no-store',
       'Content-Type': 'text/plain; charset=utf-8',
     });
@@ -3175,7 +3260,7 @@ MOD.sweep(); // 启动时先跑一次：重启期间超期的记录立刻生效�
 console.log(`[moderation] 合规巡检已启动：整改窗口 ${MOD.GRACE_MINUTES} 分钟`);
 
 // HTTP 监听地址：生产建议设 127.0.0.1（仅本机/反代可达），消除公网明文直连暴露；
-// 反代(如 your-domain.com HTTPS)在同机转发到 127.0.0.1:PORT 即可。默认 0.0.0.0 便于本地开发。
+// 反代(如 your-domain.cn HTTPS)在同机转发到 127.0.0.1:PORT 即可。默认 0.0.0.0 便于本地开发。
 const HTTP_BIND = process.env.ERP_BIND || '0.0.0.0';
 server.listen(PORT, HTTP_BIND, () => console.log(`ERP running: http://${HTTP_BIND}:${PORT}`));
 

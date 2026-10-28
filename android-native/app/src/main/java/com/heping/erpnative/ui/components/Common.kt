@@ -134,13 +134,21 @@ fun ymdFromMillis(millis: Long): String =
     java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
 
 // ---------- 离线提示条 ----------
+/**
+ * 🔴🔴 v5.7.4 离线输单：提示条要同时说清两件事 ——
+ *  ① 当前是离线状态（数据来自缓存）
+ *  ② 有多少单正在本地排队等待上传（不然用户以为单已经传出去了）
+ */
 @Composable
-fun OfflineBanner(visible: Boolean) {
+fun OfflineBanner(visible: Boolean, pendingCount: Int = 0) {
     if (!visible) return
     Surface(color = MaterialTheme.colorScheme.tertiaryContainer) {
         Box(Modifier.fillMaxWidth().padding(6.dp), contentAlignment = Alignment.Center) {
             Text(
-                "⚠ 离线模式：显示已缓存数据",
+                if (pendingCount > 0)
+                    "⚠ 离线模式：显示已缓存数据　·　${pendingCount} 单待上传（联网后自动上传）"
+                else
+                    "⚠ 离线模式：显示已缓存数据",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )

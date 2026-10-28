@@ -1,6 +1,7 @@
 package com.heping.erpnative.ui.main
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -12,6 +13,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -25,7 +27,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -416,19 +420,18 @@ private fun SuggestCard(
                         checked = picked, onCheckedChange = { onToggle() },
                         modifier = Modifier.size(28.dp)
                     )
-                    OutlinedTextField(
+                    // 🔴 2026-10-28 经理「数量输入框空白太多，可以缩小点」
+                    //    → 换紧凑版：38dp 高、标题做行内前缀、数字右对齐
+                    CompactNumField(
                         value = if (pickedQty > 0) fmtPlain(pickedQty) else "",
                         onValueChange = { txt ->
                             val v = txt.toDoubleOrNull()
                             if (v != null) onQty(v)
                         },
-                        label = { Text("数量", fontSize = 9.sp) },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.weight(1f),
-                        textStyle = LocalTextStyle.current.copy(fontSize = 12.sp, textAlign = TextAlign.Right)
-                    )
-                }
+                        title = "数量",
+                        modifier = Modifier.width(76.dp),
+                        keyboardType = KeyboardType.Decimal
+                    )                }
             }
             if (already) {
                 Spacer(Modifier.height(2.dp))
@@ -814,28 +817,26 @@ private fun NewPurchaseDialog(
                                     )
                                 }
                                 Spacer(Modifier.width(4.dp))
-                                OutlinedTextField(
+                                CompactNumField(
                                     value = fmtQty(d.qty),
                                     onValueChange = { s ->
                                         val v = s.trim().toDoubleOrNull()
                                         vm.updateDraftQty(d.productId, v ?: 0.0)
                                     },
-                                    label = { Text("数量", fontSize = 10.sp) },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier.width(78.dp)
+                                    title = "数量",
+                                    modifier = Modifier.width(84.dp),
+                                    keyboardType = KeyboardType.Number
                                 )
                                 Spacer(Modifier.width(4.dp))
-                                OutlinedTextField(
+                                CompactNumField(
                                     value = fmtQty(d.price),
                                     onValueChange = { s ->
                                         val v = s.trim().toDoubleOrNull()
                                         vm.updateDraftPrice(d.productId, v ?: 0.0)
                                     },
-                                    label = { Text("进价", fontSize = 10.sp) },
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier.width(78.dp)
+                                    title = "进价",
+                                    modifier = Modifier.width(84.dp),
+                                    keyboardType = KeyboardType.Number
                                 )
                                 IconButton(onClick = { vm.removeDraft(d.productId) }) {
                                     Icon(Icons.Filled.Delete, "移除", tint = MaterialTheme.colorScheme.error)
@@ -1079,24 +1080,20 @@ private fun PickCard(
                 fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
+            CompactNumField(
                 value = if (sel != null && sel.qty > 0) fmtPlain(sel.qty) else "",
                 onValueChange = { txt -> val v = txt.toDoubleOrNull(); if (v != null) onQty(v) },
-                label = { Text("数量", fontSize = 9.sp) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                title = "数量",
                 modifier = Modifier.fillMaxWidth(),
-                textStyle = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 12.sp, textAlign = TextAlign.Right)
+                keyboardType = KeyboardType.Decimal
             )
             Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
+            CompactNumField(
                 value = if (sel != null) fmtPlain(sel.price) else fmtPlain(p.cost),
                 onValueChange = { txt -> val v = txt.toDoubleOrNull(); if (v != null) onPrice(v) },
-                label = { Text("进价", fontSize = 9.sp) },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                title = "进价",
                 modifier = Modifier.fillMaxWidth(),
-                textStyle = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 12.sp, textAlign = TextAlign.Right)
+                keyboardType = KeyboardType.Decimal
             )
         }
     }
@@ -1135,5 +1132,59 @@ private fun NewSupplierDialog(onDismiss: () -> Unit, onSave: (String, String, St
             ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/**
+ * 采购页专用「紧凑数字输入框」。
+ *
+ * 🔴 经理 2026-10-28 反馈「采购页面数量输入框空白太多，可以缩小点」。
+ * Material3 的 `OutlinedTextField` 单行默认 56dp 高、且 label 浮起后上下留白更大，
+ * 采购单明细一行要并排放「数量 + 进价 + 删除」，被输入框撑得很高。
+ * → 这里改用 BasicTextField 自绘：固定 38dp 高、标题做**行内前缀**（不再浮起占位）、
+ *   数字右对齐、聚焦时边框变主色。尺寸完全可控，不会出现 label 溢出/文字被裁。
+ */
+@Composable
+private fun CompactNumField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    title: String,
+    modifier: Modifier = Modifier,
+    keyboardType: KeyboardType = KeyboardType.Decimal
+) {
+    var focused by remember { mutableStateOf(false) }
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        singleLine = true,
+        textStyle = LocalTextStyle.current.copy(
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurface
+        ),
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        modifier = modifier
+            .height(38.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+            .border(
+                width = 1.dp,
+                color = if (focused) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.outlineVariant,
+                shape = RoundedCornerShape(8.dp)
+            )
+            .padding(horizontal = 8.dp),
+        decorationBox = { inner ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1
+                )
+                Spacer(Modifier.weight(1f))
+                Box(Modifier.weight(2f), contentAlignment = Alignment.CenterEnd) { inner() }
+            }
+        }
     )
 }

@@ -2,6 +2,112 @@
 
 > 本文件由 AI 每次改动后自动追加，倒序排列（最新在最上）。
 
+## 2026-10-28 — v5.7.4：移动端四项优化（滑动 / 账套 / 输入框 / 离线输单同步）
+
+### 经理需求原文
+> `ERP移动版功能优化，订单页面 左右滑动的功能 滑动完后 滑回正常显示 很难滑，要非常准确的才能滑回去`
+> `移动端没有账套添加或修改功能`
+> `移动版 采购页面 数量输入框 空白界面太多 可以缩小点`
+> `移动版添加数据更新同步功能，移动版支持离网输单等功能，参考管家婆`
+
+### 一、订单页左右滑动修复（D1）
+
+**根因（两层）**：
+1. 判定用的是**绝对位移**（`offsetPx > triggerPx`，阈值 12dp）。已展开时 offsetPx=170dp，
+   用户向左滑回去要一路降到 12dp 以下才判收起 → 等于要拖 158dp 且松手卡在边界。
+2. **fling 方向判定错**：已展开时向左快扫会跳到**另一侧**露出「删除」，而不是收回原位。
+
+**修法**（`ui/components/SwipeRow.kt` → `SwipeActionsRow`）：
+- 记录 `dragStart`，用**相对位移** `rel = offsetX.value - dragStart` 判定；
+- 已展开时「朝收起方向」的 rel 超阈值或反向 fling → 收起；同向 → 保持展开；
+- `Animatable` + `snapTo`（拖动自动打断吸附动画）；`animateTo` + `spring` 吸附；
+- **展开状态下点击内容区 = 收起**（旧版除继续滑无便捷收起途径）；
+- 新增 `forceCollapsed` / `onExpandedChange` → 订单页「同时只展开一行」互斥。
+
+### 二、移动端账套增改（D2）
+
+服务端已有 `/api/books`、`/api/books/join-password`、`/api/books/invite`、
+`/api/books/invite/reset`、`/api/books/delete`（网页版同款），手机端补齐 UI：
+
+- 新增 `ui/main/BookManage.kt`（全屏弹窗）：我的账套+切换 / 新建账套 / 加入口令（保存·清除）/
+  邀请码（复制·重置）/ 删除当前账套（需输入账套名确认）；
+- `Models.kt` +5 个响应模型，`Api.kt` +5 个接口，`SettingsViewModel` +5 个方法；
+- 设置页「账套切换」分区底部加入口（**仅 boss**）；
+- 删除语义：`switched=true` → 切新账套重启；`logged_out=true` → 注销跳登录页。
+
+### 三、采购页数量输入框紧凑化（D3）
+
+Material3 `OutlinedTextField` 单行默认 56dp 高、label 浮起后留白更大 →
+采购单一行要并排「数量+进价+删除」被撑得很高。
+
+- 新增 `CompactNumField`（`BasicTextField` 自绘）：固定 **38dp** 高、标题做**行内前缀**、
+  数字右对齐、聚焦时边框变主色；
+- 替换 5 处：建议商品卡片数量、采购明细数量、采购明细进价、选商品网格数量、选商品网格进价。
+
+### 四、离线输单 + 数据更新同步（D4，参考管家婆）
+
+#### 服务端：幂等去重（前置，必做）
+
+🔴 没有幂等，联网重试会**重复下单 + 重复扣库存 + 报表销量翻倍**。
+
+- `db.js`：`orders` 表加 `client_order_id TEXT` + 部分唯一索引
+  （`WHERE client_order_id IS NOT NULL AND client_order_id <> ''`，老单互不影响）；
+- `server.js` `POST /api/orders`：识别 `client_order_id`，命中已存在单**直接返回原单**
+  （`duplicate: true`），不重复插入、不重复动库存；
+- **归属校验**：命中的单必须 `placed_by` = 当前账号，否则 403
+  （否则改一下 client_order_id 就能把别人的单据信息套出来）；
+- 并发同 id 撞唯一索引 → 回查返回原单，而不是 500。
+
+#### 客户端
+
+| 新文件 | 职责 |
+|---|---|
+| `data/LocalOrderDb.kt` | 原生 SQLiteOpenHelper 队列（**不引 Room**，避免 kapt/R8 风险） |
+| `data/NetState.kt` | ConnectivityManager 网络状态监听 |
+| `data/SyncManager.kt` | 同步器（串行 Mutex，失败分类） |
+| `ui/main/OfflineSync.kt` | 设置页「离线同步」弹窗（列表/立即同步/重试/删除） |
+
+- `SaleViewModel.submit()`：断网（IOException）→ **存本地队列**并提示「已存本机，联网后自动上传」，
+  订单不再丢失；**修改已有单不支持离线**（老单明细要与服务端对齐，盲改会冲突）；
+- 同步触发：App 启动 / 进系统 / 网络由离线恢复 / 设置页手动；
+- 失败分类：IOException → 保留队列待重试；4xx 业务错 → 标 failed 不再自动重试；
+- `OfflineBanner` 增加待上传数量；`CreateOrderRequest` 加 `client_order_id`。
+
+### 五、验证
+
+**服务端回归（隔离实例 + 生产库副本，3999 端口）**：`PASS=25 FAIL=0 ALL_PASS`
+
+- ① 首次下单 200 / 非 duplicate ② 重试 200 + duplicate + order_id/order_no 一致
+- ③ 订单列表只出现 1 条 ④ 库存只扣一次（Δ=-2 而非 -4）
+- ⑤ 普通单（无 cid）正常新建 ⑥ 不同 cid 建出不同单
+- ⑦ **他人复用同 cid → 403** + 反证（他用自己的 cid 可下单）
+- ⑧ 幂等单金额不被改价重放篡改 ⑧b 明细完整保留（items 在**顶层**）
+- ⑨ 清理后测试单消失
+
+**端到端（模拟「断网录单 → 联网上传」）**：`PASS=15 FAIL=0 E2E_ALL_PASS`
+
+- 断网请求确实失败（IOException）→ 联网重放成功
+- **网络抖动同一 payload 连发 3 次 → 仍只有 1 张单、库存只扣 1 次**
+- 队列第二条独立建单；离线退货单（type=return）金额为负且重放也幂等
+
+**生产复验**（`/www/erp/server.js` + `db.js` 已部署，`erp.service` active）：
+首次 XS20261028-0001 → 重试同号 duplicate=true → 普通单新号 → `LIVE_ALL_PASS`
+；`client_order_id` 列已建、唯一索引已建、老单非空数 = 0（历史数据零影响）。
+
+**APK**：versionCode 62 / versionName 5.7.4，22927843 B，
+sha256 `d1363900ae7e904b439e2b7fc91bffe0ca4720d0bb22331b36fa8509a9313e35`，
+签名 SHA-256 `4c4229b9…5957`（与 v5.7.3 一致），
+无 `missing_rules.txt`，8 个数据类 mapping 原名保留，
+`jar xf` 全解 2 个 dex 后 `grep -a` 命中 `erp.example.com`、无 `example.com` 残留。
+
+### 六、本轮踩坑
+
+- **SFTP 单次 put 22MB 被切断**（37 分钟后 10054 EOF）→ 改**分块上传**（1MB/块，每块独立连接，
+  远端 `.part` + 偏移记账，断线只重试当前块，可断点续传）；
+- `PendingOrder` 放 companion object 里 → 外部拿不到（要写 `LocalOrderDb.Companion.PendingOrder`）→ 移到顶层；
+- `catch` 块要用 `req`/`clientId`/`d` → 写在 `try` 内部 catch 看不到 → 提到 try 外面声明；
+- Windows 编辑器写入 `ErpNativeApp.kt` 引入 3 个 U+FFFD → 提交前必须扫（`ocr/TableFile.kt` 里那个是**故意的哨兵字符**，不是污染）。
+
 ## 2026-10-23 — v5.7.3：根治「移动版 App 里点浏览器下载，下到的是旧版本」
 
 ### 经理需求原文
@@ -21,7 +127,7 @@ SettingsScreen「用浏览器下载（备用）」→  vm.updateInfo?.url   ← 
 旧结构里 `update.json.url` = **带版本号的 R2 预签名直链**：
 
 ```
-https://…<r2-endpoint>/erp-apk/HePingERP-v5.7.1-release.apk?X-Amz-Date=…&X-Amz-Signature=…
+https://…r2.cloudflarestorage.com/erp-apk/HePingERP-v5.7.1-release.apk?X-Amz-Date=…&X-Amz-Signature=…
                                     ↑ 对象名带版本号 → 永久指向抓取那一刻的包
 ```
 

@@ -16,10 +16,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -31,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.heping.erpnative.ErpNativeApp
 import com.heping.erpnative.data.SessionStore
+import com.heping.erpnative.data.SyncManager
 import com.heping.erpnative.ui.theme.AppThemeState
 import com.heping.erpnative.ui.theme.ThemeMode
 import com.heping.erpnative.ui.components.ErrorText
@@ -69,6 +72,12 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
     var showPw by remember { mutableStateOf(false) }
     var showShop by remember { mutableStateOf(false) }
     var showUnbind by remember { mutableStateOf(false) }
+    // 🔴 v5.7.4：账套管理全屏弹窗（新建 / 加入口令 / 邀请码 / 删除）
+    var showBookManage by remember { mutableStateOf(false) }
+    // 🔴 v5.7.4：离线同步弹窗（待同步列表 + 立即同步 + 重试/删除）
+    var showOfflineSync by remember { mutableStateOf(false) }
+    // 🔴 v5.7.4：待同步单据数（入口按钮上显示）
+    var pendingCount by remember { mutableStateOf(0) }
 
     // 各分区默认展开状态：账户信息 + 外观/主题 + 版本/更新 默认展开，其余折叠，降低视觉杂乱
     var expAccount by remember { mutableStateOf(true) }
@@ -96,12 +105,34 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
         vm.checkUpdate()
         vm.loadBooks()
         if (isBoss) vm.loadSettings()
+        // 🔴 v5.7.4：进设置页先同步一次离线队列（并刷新待同步数量）
+        scope.launch {
+            pendingCount = SyncManager.pendingCount(ctx)
+            if (pendingCount > 0) {
+                val r = SyncManager.sync(ctx)
+                pendingCount = SyncManager.pendingCount(ctx)
+                if (r.ok > 0) toast(ctx, r.message ?: "已同步 ${r.ok} 单")
+            }
+        }
         val granted = perms.all { ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED }
         if (granted) vm.refreshBt(ctx) else permLauncher.launch(perms)
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         TopBar("设置")
+
+        // 🔴🔴 v5.7.4 离线同步入口（放在最上面 —— 这是「断网录单」最需要够到的功能）
+        OutlinedButton(
+            onClick = { showOfflineSync = true },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Icon(Icons.Filled.CloudUpload, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (pendingCount > 0) "离线同步（$pendingCount 单待上传）" else "离线同步 / 数据更新",
+                fontSize = 14.sp
+            )
+        }
 
         // 账户信息
         CollapsibleSection("账户信息", expAccount, { expAccount = !expAccount }) {
@@ -158,6 +189,20 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
             vm.bookMsg?.let {
                 Spacer(Modifier.height(6.dp))
                 Text(it, style = MaterialTheme.typography.labelMedium)
+            }
+
+            // 🔴 v5.7.4 经理「移动端没有账套添加或修改功能」→ 补齐账套管理入口
+            //    （新建账套 / 加入口令 / 邀请码 / 删除账套，与网页版完全对齐）
+            if (isBoss) {
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = { showBookManage = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Settings, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("账套管理（新建 / 口令 / 邀请码 / 删除）")
+                }
             }
         }
 
@@ -391,6 +436,21 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
 
     if (showPw) PasswordDialog(onDismiss = { showPw = false }, vm = vm)
     if (showShop) ShopDialog(onDismiss = { showShop = false }, vm = vm)
+    // 🔴 v5.7.4：账套管理（新建 / 加入口令 / 邀请码 / 删除）
+    if (showBookManage) {
+        BookManageDialog(
+            onDismiss = { showBookManage = false },
+            vm = vm,
+            onLoggedOut = { restartApp(ctx) }
+        )
+    }
+    // 🔴 v5.7.4：离线同步（待同步列表 / 立即同步 / 重试 / 删除）
+    if (showOfflineSync) {
+        OfflineSyncDialog(onDismiss = {
+            showOfflineSync = false
+            scope.launch { pendingCount = SyncManager.pendingCount(ctx) }
+        })
+    }
     if (showUnbind) {
         AlertDialog(
             onDismissRequest = { if (!vm.unbinding) showUnbind = false },
@@ -415,7 +475,7 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
 }
 
 /** v5.5：账套切换 / 解绑后必须重启 App——各 ViewModel 内存里缓存着旧账套的数据 */
-private fun restartApp(ctx: android.content.Context) {
+internal fun restartApp(ctx: android.content.Context) {
     try {
         val i = android.content.Intent(ctx, com.heping.erpnative.MainActivity::class.java)
         i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
