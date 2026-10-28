@@ -1,5 +1,8 @@
 package com.heping.erpnative.data
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import android.content.Context
 import com.heping.erpnative.BuildConfig
 import android.util.Log
@@ -52,8 +55,13 @@ object SessionStore {
         private set
 
     // 内存态（供 UI 直接读取，免每次查库）
-    var role: String = "staff"
-    var perms: List<String> = emptyList()
+    // 🔴🔴 2026-10-29：role / perms 必须是 **Compose 响应式状态**。
+    // 原因：OrdersScreen 在组合期读 SessionStore.can("order.edit") 来决定是否渲染「编辑」按钮；
+    // 如果 perms 是普通 var，当 perms 晚于首帧组合到达（restore() 未完成 / 401 续期异步写入），
+    // canEdit 会被固化成 false 且**永不重算** → 表现为「编辑按钮不见了」。
+    // 改成 mutableStateOf 后，任何写入都会触发重组，按钮随之出现。
+    var role: String by mutableStateOf("staff")
+    var perms: List<String> by mutableStateOf(emptyList())
     var bookId: Int = 1
     var bookName: String = ""
     var shopName: String = ""

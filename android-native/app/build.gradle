@@ -22,8 +22,8 @@ android {
         // 🔴 v5.7.3：APK 下载改走**永久短链** /downloads/apk（服务器实时 302 到当时最新版）。
         //   旧版 App 内存里缓存的 updateInfo.url 是带版本号的 R2 预签名直链 → 永久指向旧包，
         //   这是经理反馈「移动版从浏览器下载下到旧版本」的根因。详见 SettingsScreen.kt 注释。
-        versionCode 62
-        versionName "5.7.4"
+        versionCode 63
+        versionName "5.7.5"
         vectorDrawables { useSupportLibrary true }
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——
