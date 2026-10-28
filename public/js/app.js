@@ -2117,7 +2117,7 @@ if (d.trust_full) {
         // 🔴 件数（= 数量 ÷ 每箱装量），与桌面《开单模板》「合计（件数）」列同口径：
         //   保留 2 位小数不进位；箱规未维护（pack_size=0）→ 不显示（❌ 不能显示 0）。
         const packCnt = packCountOf(it, qtyN);
-        const packTxt = packCnt == null ? '' : `<span class="pack">${fmtPack(packCnt)} 件</span>`;
+        const packTxt = packCnt == null ? '' : ` · <span class="pack">${fmtPack(packCnt)} 件</span>`;
         return `<div class="sale-item${thereAreDisc ? ' has-disc' : ''}">
           ${_roPrice ? '' : `<label class="sale-sel" title="勾选后可批量设折扣"><input type="checkbox" data-sel="${i}" ${it.sel ? 'checked' : ''}/></label>`}
           <div class="info">
