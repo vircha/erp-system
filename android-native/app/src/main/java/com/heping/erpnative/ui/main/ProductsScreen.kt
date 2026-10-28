@@ -128,6 +128,9 @@ private fun ProductEditDialog(
     var cost by remember { mutableStateOf((initial?.cost ?: 0.0).toString()) }
     var qty by remember { mutableStateOf((initial?.qty ?: 0.0).toString()) }
     var low by remember { mutableStateOf((initial?.lowThreshold ?: 0.0).toString()) }
+    // 每箱装量（件数换算用）：网页版商品编辑已有此字段，手机端补齐，
+    // 否则手机端无法维护箱规 → 件数永远算不出来。
+    var pack by remember { mutableStateOf((initial?.packSize ?: 0).toString()) }
     var showScanner by remember { mutableStateOf(false) }
     val isNew = initial == null
 
@@ -169,6 +172,17 @@ private fun ProductEditDialog(
                     Spacer(Modifier.width(6.dp))
                     OutlinedTextField(value = low, onValueChange = { low = it }, label = { Text("低库存") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                 }
+                Spacer(Modifier.height(6.dp))
+                // 🔴 每箱装量（件数换算用）：件数 = 数量 ÷ 这个值，**保留 2 位小数不进位**。
+                //    0 = 不换算（单品销售/未维护箱规）→ 界面上件数列留空。
+                OutlinedTextField(
+                    value = pack,
+                    onValueChange = { s -> if (s.isEmpty() || s.matches(Regex("^\\d{0,6}$"))) pack = s },
+                    label = { Text("每箱装量（0=不换算）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
         confirmButton = {
@@ -183,7 +197,8 @@ private fun ProductEditDialog(
                         price = price.toDoubleOrNull() ?: 0.0,
                         cost = cost.toDoubleOrNull() ?: 0.0,
                         qty = qty.toDoubleOrNull() ?: 0.0,
-                        lowThreshold = low.toDoubleOrNull() ?: 0.0
+                        lowThreshold = low.toDoubleOrNull() ?: 0.0,
+                        packSize = pack.toIntOrNull() ?: 0
                     )
                     onSave(p, isNew)
                 },

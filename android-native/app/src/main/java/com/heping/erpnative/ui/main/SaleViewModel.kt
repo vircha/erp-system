@@ -51,6 +51,24 @@ data class CartLine(
      * 手机版同步补上，行内直接看得见省了多少。
      */
     fun saveAmount(): Double = ((price - unitPrice()) * qty).round2()
+
+    /**
+     * 本行件数（= 数量 ÷ 每箱装量）。
+     *
+     * 🔴🔴 口径必须与桌面《开单模板》的「合计（件数）」列**完全一致**（经理 2026-10-27 定案）：
+     *   - **保留 2 位小数，不进位**（36÷24 = **1.5**；6÷12 = **0.5**；不写成 2 和 1）
+     *   - `pack_size = 0`（未维护箱规）→ 返回 **null**，界面上**留空**，
+     *     ❌ 绝不能算成 0 —— 0 会被当成真实的「0 件」
+     *
+     * @return 件数；箱规未维护时 null
+     */
+    fun packCount(): Double? {
+        val ps = product.packSize
+        if (ps <= 0) return null
+        val v = qty / ps
+        // 保留 2 位小数（不进位）—— 与 Excel ROUND(x, 2) 一致
+        return Math.round(v * 100.0) / 100.0
+    }
 }
 
 class SaleViewModel : ViewModel() {

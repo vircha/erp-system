@@ -2075,8 +2075,25 @@ if (d.trust_full) {
     if (ex) ex.qty += 1;
     else saleState.items.push({ product_id: p.id, name: p.name, spec: p.spec, unit: p.unit,
                                 price: r.price, from: r.from, qty: 1, sel: false,
+                                pack_size: Number(p.pack_size) || 0,
                                 discount: itemDiscFor(pid), disc_from: custItemDisc[pid] != null ? 'store' : 'base' });
     renderSaleItems();
+  }
+
+  // 🔴 件数（= 数量 ÷ 每箱装量）。口径与桌面《开单模板》「合计（件数）」列完全一致：
+  //   保留 2 位小数、**不进位**（36÷24=1.5、6÷12=0.5）；pack_size=0（未维护）→ 返回 null。
+  //   ❌ 绝不能算成 0 —— 0 会被当成真实的「0 件」。
+  function packCountOf(it, qty) {
+    const ps = Number(it.pack_size) || 0;
+    if (ps <= 0) return null;
+    const v = (Number(qty) || 0) / ps;
+    return Math.round(v * 100) / 100;
+  }
+  // 件数显示文本：整数不带小数点（1 而不是 1.0），小数最多 2 位
+  function fmtPack(n) {
+    if (n == null) return '';
+    const r = Math.round(n * 100) / 100;
+    return String(r);
   }
 
   function renderSaleItems() {
@@ -2097,11 +2114,15 @@ if (d.trust_full) {
         // 🔴 2026-10-17 经理反馈「单品设置价格后没显示优惠金额」：
         //   每行显式算出「这一行让了多少钱」，直接印在小计下面，不用去汇总区猜。
         const lineSave = +(((Number(it.price) || 0) - pay) * qtyN).toFixed(2);
+        // 🔴 件数（= 数量 ÷ 每箱装量），与桌面《开单模板》「合计（件数）」列同口径：
+        //   保留 2 位小数不进位；箱规未维护（pack_size=0）→ 不显示（❌ 不能显示 0）。
+        const packCnt = packCountOf(it, qtyN);
+        const packTxt = packCnt == null ? '' : `<span class="pack">${fmtPack(packCnt)} 件</span>`;
         return `<div class="sale-item${thereAreDisc ? ' has-disc' : ''}">
           ${_roPrice ? '' : `<label class="sale-sel" title="勾选后可批量设折扣"><input type="checkbox" data-sel="${i}" ${it.sel ? 'checked' : ''}/></label>`}
           <div class="info">
             <div class="nm">${esc(it.name)}</div>
-            <div class="sub">${esc(it.spec || '')} · ${esc(it.unit || '')}${it.from === 'store' ? ' · <span style="color:var(--primary)">上次价</span>' : ''}${thereAreDisc ? ` · <span style="color:#f5a524">${it.disc_from === 'store' ? '上次折扣' : '已打折'}</span>` : ''}</div>
+            <div class="sub">${esc(it.spec || '')} · ${esc(it.unit || '')}${it.from === 'store' ? ' · <span style="color:var(--primary)">上次价</span>' : ''}${thereAreDisc ? ` · <span style="color:#f5a524">${it.disc_from === 'store' ? '上次折扣' : '已打折'}</span>` : ''}${packTxt}</div>
           </div>
           <div class="fields">
             ${_roPrice
@@ -2124,7 +2145,8 @@ if (d.trust_full) {
         saleState.items[+e.target.dataset.sel].sel = e.target.checked;
         const a = $('#qd-all'); if (a) a.checked = allSel();
       });
-      box.querySelectorAll('input[data-i]').forEach(inp => inp.onchange = e => { const i = +e.target.dataset.i; let v = parseFloat(e.target.value); if (!(v > 0)) v = 1; saleState.items[i].qty = v; e.target.value = v; updateTotal(); });
+      // 🔴 数量变化要整表重渲染：否则「件数」（= 数量 ÷ 每箱装量）不会跟着变。
+      box.querySelectorAll('input[data-i]').forEach(inp => inp.onchange = e => { const i = +e.target.dataset.i; let v = parseFloat(e.target.value); if (!(v > 0)) v = 1; saleState.items[i].qty = v; e.target.value = v; renderSaleItems(); });
       box.querySelectorAll('input[data-pi]').forEach(inp => inp.onchange = e => { const i = +e.target.dataset.pi; let v = parseFloat(e.target.value); if (!(v >= 0)) v = 0; saleState.items[i].price = v; saleState.items[i].from = 'manual'; e.target.value = v; updateTotal(); });
       // 单品折扣：改完统一刷新（要同步「小计」和「上次折扣」标记）
       box.querySelectorAll('input[data-di]').forEach(inp => inp.onchange = e => {
@@ -2780,7 +2802,11 @@ if (d.trust_full) {
     const o = d.order;
     saleState.customer_id = o.customer_id;
     saleState.customer_name = o.customer_name;
-    saleState.items = d.items.map(it => ({ product_id: it.product_id, name: it.product_name, spec: it.spec, unit: it.unit, price: it.price, from: 'store', qty: it.qty }));
+    // 🔴 订单明细里没有 pack_size 快照（快照只存名称/条码/规格）→ 从商品表回查，否则复制后件数空白
+    saleState.items = d.items.map(it => {
+      const pr = allProducts.find(x => x.id === it.product_id);
+      return { product_id: it.product_id, name: it.product_name, spec: it.spec, unit: it.unit, price: it.price, from: 'store', qty: it.qty, pack_size: Number(pr && pr.pack_size) || 0 };
+    });
     await loadCustPrices(o.customer_id);
     navigate('sale').then(() => {
       const sel = $('#sale-customer'); if (sel) sel.value = o.customer_id || '';
@@ -2812,9 +2838,12 @@ if (d.trust_full) {
       const hasDisc = isFinite(od) && od > 0 && od < 1 - 1e-9;
       const base = (hasDisc && isFinite(op) && op > 0) ? op : Math.abs(Number(it.price) || 0);
       const q = editingReturn ? Math.abs(Number(it.qty) || 0) : Number(it.qty);
+      // 🔴 订单明细没有 pack_size 快照 → 从商品表回查（否则编辑老单时件数空白）
+      const pr = allProducts.find(x => x.id === it.product_id);
       return {
         product_id: it.product_id, name: it.product_name, spec: it.spec, unit: it.unit,
         price: base, from: 'manual', qty: q,
+        pack_size: Number(pr && pr.pack_size) || 0,
         discount: hasDisc ? od : 1, disc_from: hasDisc ? 'manual' : 'base'
       };
     });

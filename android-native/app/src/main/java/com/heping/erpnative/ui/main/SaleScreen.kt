@@ -641,6 +641,18 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                                     maxLines = 1
                                 )
                             }
+                            // 🔴 件数（= 数量 ÷ 每箱装量），与桌面《开单模板》「合计（件数）」列同口径。
+                            //   箱规未维护（pack_size=0）→ **不显示**（❌ 不能显示 0，会被当成真实的 0 件）。
+                            //   保留 2 位小数不进位：36÷24=1.5、6÷12=0.5。
+                            val packCnt = line.packCount()
+                            if (packCnt != null) {
+                                Text(
+                                    "${fmtQty(packCnt)} 件",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
                         }
                         // 单品折扣：有的商品有、有的没有，逐行独立
                         // 🔴 2026-10-20 客户账号：只读展示（服务端已强制取价，见 ItemDiscountBox 注释）

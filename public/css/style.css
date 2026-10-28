@@ -120,6 +120,8 @@ label{display:block;font-size:14px;color:var(--muted);margin:12px 0 4px;}
 .sale-item .info{flex:1;min-width:0;}
 .sale-item .info .nm{font-weight:500;}
 .sale-item .info .sub{font-size:12px;color:var(--muted);}
+/* 🔴 件数（= 数量 ÷ 每箱装量），与桌面《开单模板》「合计（件数）」列同口径 */
+.sale-item .info .sub .pack{color:var(--primary);font-weight:500;margin-left:4px;}
 .sale-item input{width:64px;text-align:center;padding:6px;}
 /* 明细行的「单价/折扣/数量/小计/删」字段组 */
 .sale-item .fields{display:flex;align-items:center;gap:6px;flex:none;}

@@ -103,6 +103,9 @@ data class Product(
     val unit: String? = "个",
     val price: Double = 0.0,
     val cost: Double = 0.0,
+    // 每箱装量（件数换算用）：件数 = 数量 ÷ pack_size。0 = 未维护（件数留空，不算成 0）。
+    // 服务端商品列表接口 SELECT p.* 已下发该字段。
+    @SerializedName("pack_size") val packSize: Int = 0,
     // 列表接口 JOIN 出来的库存字段
     val qty: Double = 0.0,
     @SerializedName("low_threshold") val lowThreshold: Double = 0.0,
