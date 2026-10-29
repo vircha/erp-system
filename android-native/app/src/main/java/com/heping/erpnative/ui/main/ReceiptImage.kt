@@ -195,13 +195,18 @@ object ReceiptImage {
          * 🔴 2026-10-29：倍宽绘制（模拟 ESC/POS 的 `GS ! 0x01` = 宽×2、高×1）。
          *
          * Canvas 没有 ESC/POS 指令，但 `Paint.textScaleX = 2f` 效果完全等价：
-         * 字号不变（→ 高度不变、行高不变、纸长不变），每个字符横向拉伸 2 倍、
-         * 正好占 2 个半角列（Courier 半角步进 0.6×字号 → 2×0.6×fs = 2 列）。
+         * 字号不变（→ 高度不变、行高不变、纸长不变），每个字符横向拉伸 2 倍。
          *
-         * 用途：合计「优惠后金额」的数字用倍宽大字 → 竖笔画被拉成 2 点宽，
-         * 「6」和「8」绝不混淆（本机热敏打印机 Font A 12×24 点阵下最细的 1 点竖易糊断）。
+         * 用途：合计「优惠后金额」的**数字**用倍宽大字 → 竖笔画被拉成 2 点宽，
+         * 「6」和「8」一眼可辨。
          *
          * @param startCol 起始列号（0 基）
+         *
+         * 🔴🔴 2026-10-30 修：前进量必须**按字符实际宽度 × 2**（半角 1 列 → 2 列，
+         *    全角 2 列 → 4 列）。原实现写死 `c += 2`，一旦传入汉字就会
+         *    「字被挤扁 + 相邻字重叠」—— 经理看到的「优惠后金额几个字不规则」就是它。
+         *    🔴 顺带原则：**中文字一律不要走 textWide**（见下方合计段注释），
+         *       拉伸矢量汉字观感本来就差，且与实打印 BtPrinter.kt 不一致。
          */
         fun textWide(str: String, baseY: Float, startCol: Int,
                      bold: Boolean = true, sizePt: Float = fs) {
@@ -210,9 +215,10 @@ object ReceiptImage {
             paint.textScaleX = 2f
             var c = startCol
             for (ch in str) {
-                if (c + 2 > COLS) break
+                val span = (if (isWide(ch)) 2 else 1) * 2   // 字符本身宽度 × 倍宽系数 2
+                if (c + span > COLS) break
                 cv.drawText(ch.toString(), margin + c * colW, baseY, paint)
-                c += 2            // 倍宽字符占 2 列
+                c += span
             }
             paint.textScaleX = 1f
             paint.textSize = sizePt
@@ -307,16 +313,15 @@ object ReceiptImage {
         val rightW = wOf(payLabel) + payNumW
         val avail = COLS - rightW
         if (wOf(savedTxt) <= avail) {
-            // 左半段用普通字重画（padR 补到 avail 列），标签 + 倍宽数字画在右半段
-            val leftPart = padR(savedTxt, avail)
-            text(leftPart, bold = true)
-            textWide(payLabel, y, avail, bold = true)
+            // 🔴 标签「优惠后金额:」必须**正常宽度**：
+            //    ① 与实打印 BtPrinter.kt 完全一致（那里只有 payNum 夹在 DOUBLE_W/DOUBLE_OFF 之间）；
+            //    ② 汉是矢量字形，横向拉伸 2 倍会挤扁压扁 → 经理反馈「字不规则」。
+            text(padR(savedTxt, avail) + payLabel, bold = true)
             textWide(payNum, y, avail + wOf(payLabel), bold = true)
         } else {
             text(savedTxt, bold = true)
             y += lh * 0.95f
-            text(padR("", avail), bold = true)
-            textWide(payLabel, y, avail, bold = true)
+            text(padR("", avail) + payLabel, bold = true)
             textWide(payNum, y, avail + wOf(payLabel), bold = true)
         }
         y += lh

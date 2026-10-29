@@ -268,20 +268,26 @@
      * @param baseY  基线（1x 坐标）
      * @param startCol 起始列号（0 基）
      */
+    // 🔴🔴 2026-10-30 修：前进量必须**按字符实际宽度 × 2**（半角 1 列 → 2 列，全角 2 列 → 4 列）。
+    //    原实现写死 `c += 2`，一旦传入汉字就会「字被挤扁 + 相邻字重叠」——
+    //    这就是经理反馈「订单预览里『优惠后金额』几个字不规则」的根因。
+    //    🔴 顺带原则：**中文字一律不要走 textWide**（见下方合计段注释），
+    //       横向拉伸矢量汉字观感差，且与网页 ESC 打印 renderEsc() 不一致。
     function textWide(str, baseY, startCol, opt) {
       opt = opt || {};
       const size = (opt.fs || FS) * s;
       const mono = '"Courier New",Menlo,Consolas,monospace';
       let c = startCol;
       for (const ch of String(str == null ? '' : str)) {
-        if (c + 2 > COLS) break;
+        const span = (isWide(ch) ? 2 : 1) * 2;  // 字符本身宽度 × 倍宽系数 2
+        if (c + span > COLS) break;
         ctx.save();
         ctx.font = (opt.bold ? 'bold ' : '') + size + 'px ' + mono;
         ctx.translate(px(M + c * cw), px(baseY));
         ctx.scale(2, 1);                    // 横向 2 倍、高不变
         ctx.fillText(ch, 0, 0);
         ctx.restore();
-        c += 2;                            // 倍宽字符占 2 列
+        c += span;
       }
     }
     function lf(n) { y += (n || 1) * LH * s; }
@@ -390,14 +396,15 @@
         const rightW = wOf('优惠后金额:') + payNumW;
         const avail = COLS - rightW;
         if (wOf(ls) <= avail) {
-          text(padR(ls, avail), { bold: true });
-          textWide('优惠后金额:', y, avail, { bold: true });
+          // 🔴 标签「优惠后金额:」必须**正常宽度**：
+          //    ① 与网页 ESC 打印（renderEsc）完全一致 —— 那里只有 payNum 夹在 DOUBLE_W/DOUBLE_OFF 之间；
+          //    ② 中文是矢量字形，横向拉伸 2 倍会挤扁压扁 → 经理反馈「字不规则」。
+          text(padR(ls, avail) + '优惠后金额:', { bold: true });
           textWide(payNum, y, avail + wOf('优惠后金额:'), { bold: true });
         } else {
           text(ls, { bold: true });
           lf(0.95);
-          text(padR('', avail), { bold: true });
-          textWide('优惠后金额:', y, avail, { bold: true });
+          text(padR('', avail) + '优惠后金额:', { bold: true });
           textWide(payNum, y, avail + wOf('优惠后金额:'), { bold: true });
         }
       } else {

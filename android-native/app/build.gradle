@@ -38,8 +38,13 @@ android {
         //     ③ 合计「优惠后金额」用 GS ! 0x01 倍宽（宽×2、高×1，每字符占 2 列）。
         //   版式：LEFT_W(18) + "|"(1) + 数量(6) + 原价(7) + 特价(7) + "|"(1) + 金额(8) = 48 ✓
         //   同时修掉「App 预览图还是旧 3 列、与实打印不一致」的历史 bug。
-        versionCode 67
-        versionName "5.7.9"
+        // 🔴 v5.7.10：修预览端「优惠后金额」中文标签被横向拉伸压扁（经理反馈「字不规则」）。
+        //   根因：预览端把中文标签也走了倍宽绘制，而倍宽的逐字符前进量写死 2 列
+        //   （汉字本该占 4 列）→ 字形压扁 + 相邻字重叠。
+        //   修复：① 标签改回正常宽度（与实打印 BtPrinter.kt / renderEsc 一致）；
+        //         ② textWide 前进量改为「字符实际宽度 × 2」。
+        versionCode 68
+        versionName "5.7.10"
         vectorDrawables { useSupportLibrary true }
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——
