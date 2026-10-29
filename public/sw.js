@@ -24,7 +24,8 @@
 //v22：导航栏加品牌图标 + 手机版下载按钮（含二维码）
 //v21：预览浮层 z-index 提到 70，不再被订单详情弹窗压住
 //v62：开单页购物车行显示「件数」（= 数量 ÷ 每箱装量，保留 2 位小数不进位）
-const CACHE = 'erp-shell-v62';   // v50: 客户下单员多门店（门店切换器 + 门店多选授权 + 按当前门店取历史价）
+//v63：退货单可编辑（订单详情弹窗放开「修改订单」；退货单复制按原样复制成退货单）
+const CACHE = 'erp-shell-v63';   // v50: 客户下单员多门店（门店切换器 + 门店多选授权 + 按当前门店取历史价）
 const SHELL = ['/', '/index.html', '/css/style.css', '/css/login.css', '/css/feedback.css', '/css/print_template.css',
   '/js/app.js', '/js/receipt_preview.js', '/js/print_template.js',
   '/js/qrcode-mini.js', '/js/apk_download.js', '/js/feedback.js', '/privacy.html', '/img/logo_192.png'];

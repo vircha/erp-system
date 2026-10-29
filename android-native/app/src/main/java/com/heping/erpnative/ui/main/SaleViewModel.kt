@@ -192,12 +192,15 @@ class SaleViewModel : ViewModel() {
         val od = (discount ?: 1.0).let { if (it > 0) it else 1.0 }
         val op = origPrice ?: 0.0
         // 有单品折扣的行：price 是折后价，要用折前单价回填，否则再存一次就折两次
-        val base = if (od < 1.0 && op > 0) op else price
+        // 🔴 2026-10-29：只有「折前 × 折扣 ≈ 成交价」时才敢带折扣。
+        //   orig_price 为 NULL 的老单若仍带 discount → 拿成交价再乘一次折扣 = 二次打折。
+        val hasDisc = od < 1.0 && op > 0 && Math.abs(op * od - Math.abs(price)) < 0.05
+        val base = if (hasDisc) op else Math.abs(price)
         // 🔴 2026-10-15：退货单明细 qty 是负数，装车必须取绝对值。
         // 否则购物车显示「-2 件」，用户再提交会让服务端按 qty 再翻一次负号。
         // （提交时客户端一律传正数量，负号统一由服务端按 sign 处理。）
         val q = kotlin.math.abs(qty)
-        return CartLine(p, q, base, od.coerceIn(0.1, 1.0))
+        return CartLine(p, q, base, if (hasDisc) od.coerceIn(0.1, 1.0) else 1.0)
     }
 
     private fun fmtDiscInput(d: Double): String {

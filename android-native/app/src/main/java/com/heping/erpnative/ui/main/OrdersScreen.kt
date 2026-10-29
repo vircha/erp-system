@@ -247,11 +247,14 @@ fun OrdersScreen(
                     } else {
                     // 右滑：复制 / 打印；左滑：删除
                     SwipeActionsRow(
-                        // 🔴 按钮宽度从 76 收到 56，区域宽度同步收窄（经理 10/15：空白太多）
-                        startActionsWidth = if (canEdit && o.status != "returned") 170.dp else 114.dp,
+                        // 🔴 2026-10-29 经理反馈「退货订单无法编辑」：
+                        //   入口的 `o.status != "returned"` 限制已移除 —— 服务端 PUT 与 SaleViewModel
+                        //   （prepareEdit 保留退货模式 / toEditLine 取绝对值 / submit 带 type='return'）
+                        //   早在 2026-10-15 就完整支持编辑退货单，这里只是把入口打开。
+                        startActionsWidth = if (canEdit) 170.dp else 114.dp,
                         endActionsWidth = 56.dp,
                         startActions = {
-                            if (canEdit && o.status != "returned") {
+                            if (canEdit) {
                                 SwipeAction(
                                     icon = Icons.Filled.Edit,
                                     text = "编辑",
@@ -568,8 +571,10 @@ fun OrderDetailDialog(
                         Text("存为图片", fontSize = 12.sp, maxLines = 1)
                     }
                 }
-                // 第二行：修改订单（已退货的单不给改）。没有编辑权限时不占行。
-                if (canEdit && o.status != "returned") {
+                // 第二行：修改订单（可增删商品）。
+                // 🔴 2026-10-29：退货单现在也允许修改 —— 服务端 PUT 按 status='returned' 自动取负号回补库存。
+                // 没有编辑权限时不占行。
+                if (canEdit) {
                     Spacer(Modifier.height(6.dp))
                     OutlinedButton(
                         onClick = { onClose(); onEditOrder(o.id) },

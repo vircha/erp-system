@@ -2,6 +2,73 @@
 
 > 本文件由 AI 每次改动后自动追加，倒序排列（最新在最上）。
 
+## 2026-10-29 — v5.7.7：修复「退货订单无法编辑」（网页版 + 手机端同步）
+
+### 经理需求原文
+> `发现了 是退货订单无法编辑`
+
+### 一、根因：链路早就做完了，只有「入口」被前端藏起来
+
+服务端 `PUT /api/orders/:id` 从 2026-10-15 起就完整支持编辑退货单
+（`isReturnEdit = o.status === 'returned'` → 金额取负、库存回补、`status` 锁死 `returned`、
+退货不写历史价）；手机端 `SaleViewModel.prepareEdit()` 也早就保留退货模式
+（`mode = "return"` / `toEditLine()` 取数量绝对值 / `submit()` 带 `type='return'`）。
+
+但两端的**入口按钮**都带着 `status != "returned"` 的判断，把能力藏了起来：
+
+| 层 | 位置 | 原判断 |
+|---|---|---|
+| 手机端 | `OrdersScreen.kt` 滑动区宽度 | `if (canEdit && o.status != "returned") 170.dp else 114.dp` |
+| 手机端 | `OrdersScreen.kt` 滑动「编辑」按钮 | `if (canEdit && o.status != "returned") { SwipeAction(Edit…) }` |
+| 手机端 | `OrdersScreen.kt` 详情弹窗「修改订单」 | `if (canEdit && o.status != "returned") { … }` |
+| 网页版 | `public/js/app.js` 详情弹窗按钮区 | 整块 `${returned ? '' : \`…m-edit…m-copy…m-return…\`}` |
+
+### 二、修复内容
+
+**手机端（3 处）**：移除 `o.status != "returned"` 限制 → 退货单可左滑「编辑」、
+详情弹窗可点「修改订单」。
+
+**网页版（1 处）**：详情弹窗按钮区不再整块隐藏，改为逐按钮判定：
+- 「修改订单」始终显示（有 `order.edit` 权限即可）；
+- 「复制」文案随单据类型变化：普通单「复制为新开单」/ 退货单「复制为新退货单」；
+- 「整张退货」对退货单隐藏（服务端会 400「退货单不能再退」，属正常业务约束）。
+
+### 三、顺带修复两个数据正确性 bug
+
+**Bug 1：复制退货单会变成销售单**（两端都有）
+
+退货单明细 `qty` 是负数，直接复制会被服务端 `Math.abs()` 取正 → 复制出一张**正数销售单**
+（账目出错）；且网页版未设 `saleDocType`、手机端传了 `status = "paid"` → 提交时 `type = null`
+→ 生成 XS 销售单而非 TH 退货单。
+
+- 手机端 `OrdersViewModel.copyOrder()`：`qty` 取绝对值 + `type = 'return'` + 退货单不传 `status='paid'`；
+- 网页版 `copyToNewOrder()`：`saleDocType` 锁到 `'return'` + `qty` 取绝对值。
+
+**Bug 2：折前价回填的「二次打折」风险**（两端都有）
+
+`order_items.orig_price` 对老单可能为 NULL。原回填逻辑只要 `discount ∈ (0,1)` 就回填折前价 + 折扣率；
+若 `orig_price` 为 NULL 则回填**成交价**却仍带 `discount` → 服务端 `lineCalc(price, qty, discount)`
+再乘一次折扣 = **二次打折**。
+
+✅ 统一改为：只有「折前价 × 折扣 ≈ 实际成交价」（容差 0.01 / 0.05）时才敢带 `discount`，
+否则按成交价 + `discount = 1` 提交。涉及 4 处：网页版 `copyToNewOrder` / `editOrder`、
+手机端 `OrdersViewModel.copyOrder` / `SaleViewModel.toEditLine`。
+
+### 四、验证
+
+- 网页版 Playwright 端到端：退货单详情弹窗 `m-edit=1 m-copy=1 m-return=0`；点「修改订单」进开单页显示
+  「应退」口径、明细数量回填正数、按钮为「保存修改（TH…）」；API 复核 PUT 后 `status` 仍 `returned`、
+  `qty` 仍负、`total` 仍负；**反向证明**普通销售单 `m-return=1`（排除断言恒真的假阴性）。
+- 服务端行为复核：`POST /api/orders` 带 `type='return'` → 生成 TH 单号、`status='returned'`、
+  `qty` 负、金额负。
+- 手机端：`assembleRelease` + R8 + 签名校验通过；`aapt dump badging` 确认 `versionCode=65 / versionName=5.7.7`。
+
+### 五、发版
+
+- 官网短链 `https://erp.example.com/downloads/apk` → 302 → R2 预签名直链；
+  下载包 sha256 与本地产物一致（22,927,843 B）。
+- 🔴 公开仓库 **不传正式 APK**（含真实 `BuildConfig.API_BASE`）→ CI 只出 debug 签名演示包。
+
 ## 2026-10-28 — v5.7.4：移动端四项优化（滑动 / 账套 / 输入框 / 离线输单同步）
 
 ### 经理需求原文

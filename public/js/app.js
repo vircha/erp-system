@@ -2779,12 +2779,11 @@ if (d.trust_full) {
         <button class="btn-sm gray" id="m-preview" style="flex:1">📄 订单预览</button>
         <button class="btn-sm gray" id="m-saveimg" style="flex:1">💾 保存为图片</button>
       </div>
-      ${returned ? '' : `
       <div class="row" style="gap:8px;margin-top:8px">
         ${can('order.edit') ? '<button class="btn-sm gray" id="m-edit" style="flex:1">修改订单</button>' : ''}
-        ${can('sale.create') ? '<button class="btn-sm gray" id="m-copy" style="flex:1">复制为新开单</button>' : ''}
-        ${can('order.return') ? '<button class="btn-sm danger" id="m-return" style="flex:1">整张退货</button>' : ''}
-      </div>`}
+        ${can('sale.create') ? `<button class="btn-sm gray" id="m-copy" style="flex:1">${returned ? '复制为新退货单' : '复制为新开单'}</button>` : ''}
+        ${can('order.return') && !returned ? '<button class="btn-sm danger" id="m-return" style="flex:1">整张退货</button>' : ''}
+      </div>
       ${can('order.delete') ? '<button class="btn-sm danger" id="m-del" style="width:100%;margin-top:8px">删除订单</button>' : ''}`);
     // 订单页打印：同样先选模板（第二次打单也走同一条路径，版式永远一致）
     $('#m-print').onclick = () => { closeModal(); openReceipt(id, { title: returned ? '销售退货单' : '' }, true); };
@@ -2800,19 +2799,40 @@ if (d.trust_full) {
   async function copyToNewOrder(d) {
     await ensureSaleData();
     const o = d.order;
+    // 🔴 2026-10-29：复制「退货单」必须原样复制成退货单。
+    //   退货单明细 qty 是负数 → 直接复制会被服务端 Math.abs 取正 → 复制出一张正数销售单（账目出错）；
+    //   saleDocType 也必须锁到 'return'，否则提交时 type=null → 生成 XS 销售单而不是 TH 退货单。
+    //   判据与 editOrder 一致：status==='returned' 或 total<0。
+    const editingReturn = o.status === 'returned' || Number(o.total) < 0;
+    saleDocType = editingReturn ? 'return' : 'sale';
     saleState.customer_id = o.customer_id;
     saleState.customer_name = o.customer_name;
     // 🔴 订单明细里没有 pack_size 快照（快照只存名称/条码/规格）→ 从商品表回查，否则复制后件数空白
     saleState.items = d.items.map(it => {
       const pr = allProducts.find(x => x.id === it.product_id);
-      return { product_id: it.product_id, name: it.product_name, spec: it.spec, unit: it.unit, price: it.price, from: 'store', qty: it.qty, pack_size: Number(pr && pr.pack_size) || 0 };
+      // 单品折扣：原单有 orig_price 说明是带单品折扣开出来的 → 回填折前单价 + 折扣率
+      const op = Number(it.orig_price);
+      const od = Number(it.discount);
+      const pr0 = Math.abs(Number(it.price) || 0);
+      // 🔴 只有「折前价 × 折扣 == 实际成交价」时才敢带 discount。
+      //   老单的 orig_price 可能为 NULL → 若仍带 discount，服务端会拿「成交价」再乘一次折扣 = 二次打折。
+      const hasDisc = isFinite(od) && od > 0 && od < 1 - 1e-9
+        && isFinite(op) && op > 0 && Math.abs(op * od - pr0) < 0.01;
+      const base = hasDisc ? op : pr0;
+      return {
+        product_id: it.product_id, name: it.product_name, spec: it.spec, unit: it.unit,
+        price: base, from: 'store',
+        qty: Math.abs(Number(it.qty) || 0),        // 🔴 退货单 qty 是负数 → 复制时取绝对值
+        pack_size: Number(pr && pr.pack_size) || 0,
+        discount: hasDisc ? od : 1, disc_from: hasDisc ? 'manual' : 'base'
+      };
     });
     await loadCustPrices(o.customer_id);
     navigate('sale').then(() => {
       const sel = $('#sale-customer'); if (sel) sel.value = o.customer_id || '';
       showCustHint();
       renderSaleItems();
-      toast('已复制到开单页，可修改后提交');
+      toast(editingReturn ? ('已复制到退货单页（' + o.order_no + '），可修改后提交') : '已复制到开单页，可修改后提交');
     });
   }
   // 修改订单（复用开单界面：编辑模式）
@@ -2835,8 +2855,12 @@ if (d.trust_full) {
     saleState.items = d.items.map(it => {
       const op = Number(it.orig_price);
       const od = Number(it.discount);
-      const hasDisc = isFinite(od) && od > 0 && od < 1 - 1e-9;
-      const base = (hasDisc && isFinite(op) && op > 0) ? op : Math.abs(Number(it.price) || 0);
+      const pr0 = Math.abs(Number(it.price) || 0);
+      // 🔴 只有「折前价 × 折扣 == 实际成交价」时才敢带 discount。
+      //   orig_price 为 NULL 的老单若仍带 discount → 服务端拿「成交价」再乘一次折扣 = 二次打折。
+      const hasDisc = isFinite(od) && od > 0 && od < 1 - 1e-9
+        && isFinite(op) && op > 0 && Math.abs(op * od - pr0) < 0.01;
+      const base = hasDisc ? op : pr0;
       const q = editingReturn ? Math.abs(Number(it.qty) || 0) : Number(it.qty);
       // 🔴 订单明细没有 pack_size 快照 → 从商品表回查（否则编辑老单时件数空白）
       const pr = allProducts.find(x => x.id === it.product_id);
@@ -4261,7 +4285,7 @@ if (d.trust_full) {
       <label>规格</label><input id="f-spec" value="${esc(p.spec || '')}"/>
       <label>单位</label><input id="f-unit" value="${esc(p.unit || '个')}"/>
       <label>每箱装量（件数换算用，0=不换算）</label><input id="f-pack" type="number" min="0" step="1" value="${Number(p.pack_size) || 0}"/>
-      <div class="muted" style="font-size:11px;margin:-6px 0 10px">例：100g*8 的酸奶填 8。开单模板的「合计（件数）」= 数量 ÷ 这个值，不足一箱进位。单品销售（瓶/杯/支）填 0。</div>
+      <div class="muted" style="font-size:11px;margin:-6px 0 10px">例：100g*8 的酸奶填 8。开单模板的「合计（件数）」= 数量 ÷ 这个值，保留 2 位小数（不足一箱显示小数，不进位）。单品销售（瓶/杯/支）填 0。</div>
       <label>单价（元）</label><input id="f-price" type="number" step="0.01" value="${p.price}"/>
       <label>进价（元，用于利润分析）</label><input id="f-cost" type="number" step="0.01" value="${p.cost || 0}"/>
       <button class="btn-primary" id="f-save" style="margin-top:14px">保存</button>`);

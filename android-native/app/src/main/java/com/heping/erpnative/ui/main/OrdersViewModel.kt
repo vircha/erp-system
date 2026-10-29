@@ -98,13 +98,36 @@ class OrdersViewModel : ViewModel() {
             val d = ErpClient.api.orderDetail(id)
             val o = d.order
             if (o.customerId <= 0) return false to "该订单无客户信息，无法复制"
+            // 🔴 2026-10-29：复制「退货单」必须原样复制成退货单。
+            //   退货单明细 qty 是负数，直接传会被服务端 Math.abs 取正 → 复制出一张正数销售单（账目出错）；
+            //   status="paid" 也会让它变成普通销售单。正确做法：qty 取绝对值 + type='return'
+            //   （服务端据此强制 status='returned'、金额取负、TH 单号、库存回补）。
+            val isReturn = o.status == "returned" || o.total < 0
             val req = CreateOrderRequest(
                 customerId = o.customerId,
-                items = d.items.map { CreateOrderItem(productId = it.product_id, qty = it.qty, price = it.price) },
+                // 🔴 单品折扣要一起复制：原单带折扣的行，price 是**折后**成交价。
+                //   不带 discount 的话服务端会走「price 就是成交价」的兼容分支 → 折扣记忆丢失；
+                //   带 discount 时 price 必须是**折前**单价（服务端 lineCalc 拿它乘折扣还原成交价）。
+                items = d.items.map {
+                    val od = it.discount ?: 1.0
+                    val op = it.origPrice ?: 0.0
+                    val pr0 = kotlin.math.abs(it.price)
+                    // 🔴 只有「折前 × 折扣 ≈ 成交价」时才带 discount。
+                    //   orig_price 为 NULL 的老单若仍带 discount → 服务端拿成交价再乘一次折扣 = 二次打折。
+                    val hasDisc = od > 0 && od < 1.0 - 1e-9 && op > 0 && kotlin.math.abs(op * od - pr0) < 0.05
+                    CreateOrderItem(
+                        productId = it.product_id,
+                        qty = kotlin.math.abs(it.qty),
+                        price = if (hasDisc) op else pr0,
+                        discount = if (hasDisc) od else null
+                    )
+                },
                 discount = if ((o.discount) != 1.0) o.discount else null,
                 orderDate = todayStr(),
-                status = "paid",
-                remark = "复制自 ${o.orderNo}"
+                // 退货单不能传 status='paid' —— 服务端见到 type='return' 会强制置为 returned
+                status = if (isReturn) null else "paid",
+                remark = "复制自 ${o.orderNo}",
+                type = if (isReturn) "return" else null
             )
             val r = ErpClient.api.createOrder(req)
             loadOrders()
