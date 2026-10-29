@@ -2104,7 +2104,12 @@ if (d.trust_full) {
     else {
       // 🔴 客户模式：单价/折扣只读。勾选框也一并去掉 —— 它只服务于「批量设单品折扣」，
       //   而客户没有折扣区，留一个勾选框点了没反应反而让人以为能操作。
-      const _roPrice = (ME.role === 'customer');
+      // 🔴🔴 2026-10-30 经理需求「客户退货金额+折扣也要按照历史金额+折扣」：
+      //   服务端已对**所有退货路径**强制按历史快照/门店历史价取价（server.js resolveReturnPrice），
+      //   报文里的 price/discount 一律忽略 → 退货模式下这两个框必须只读，
+      //   否则用户改了没反应却不知道原因。
+      //   整单折扣（sale-discount）仍可手填 —— 那是「协商让利」的口子，与行级历史价不冲突。
+      const _roPrice = (ME.role === 'customer') || isReturnMode();
       box.innerHTML = saleState.items.map((it, i) => {
         const d = discOf(it);
         const pay = linePrice(it);
@@ -2130,8 +2135,9 @@ if (d.trust_full) {
               //   只读 input（而不是删掉）：经理明确要求「可以显示」，客户要能看见自己付多少。
               //   🔴 这只是交互层 —— 服务端已对客户强制按 customer_prices 取价（server.js
               //      _forceStorePrice），改报文也改不动。这里加 readonly 只是不让用户白点。
-              ? `<label class="fd is-ro"><span>单价</span><input type="number" value="${it.price}" readonly title="单价按本店历史价，不能修改"/></label>
-                 <label class="fd is-ro"><span>折扣</span><input type="number" value="${d}" readonly title="折扣由商家定，不能修改"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`
+              // 🔴🔴 2026-10-30 退货模式同理：服务端已强制按历史价取价（resolveReturnPrice）。
+              ? `<label class="fd is-ro"><span>单价</span><input type="number" value="${it.price}" readonly title="${ME.role === 'customer' ? '单价按本店历史价，不能修改' : '退货单价按历史成交价，不能修改'}"/></label>
+                 <label class="fd is-ro"><span>折扣</span><input type="number" value="${d}" readonly title="${ME.role === 'customer' ? '折扣由商家定，不能修改' : '退货折扣按历史折扣，不能修改'}"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`
               : `<label class="fd"><span>单价</span><input type="number" min="0" step="0.01" value="${it.price}" data-pi="${i}"/></label>
                  <label class="fd"><span>折扣</span><input type="number" min="0.1" max="1" step="0.01" value="${d}" data-di="${i}"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`}
             <label class="fd"><span>数量</span><input type="number" min="1" step="1" value="${it.qty}" data-i="${i}"/></label>

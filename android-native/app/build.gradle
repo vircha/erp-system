@@ -24,8 +24,13 @@ android {
         //   这是经理反馈「移动版从浏览器下载下到旧版本」的根因。详见 SettingsScreen.kt 注释。
         // 🔴 v5.7.7：放开「退货订单无法编辑」—— 订单行/详情弹窗的编辑入口不再排除 status='returned'；
         //   复制退货单按原样复制成退货单（qty 取绝对值 + type='return'），不再变成销售单。
-        versionCode 65
-        versionName "5.7.7"
+        // 🔴 v5.7.8：退货金额与折扣按**历史**取价（服务端对全部 4 条退货路径强制执行：
+        //   手工退货单 / 整张退货 / 部分退货 / 编辑退货单，报文里的 price、discount 一律忽略），
+        //   折前价取自原单快照（快照缺失则回退门店历史价 customer_prices.price）。
+        //   网页版与手机端同步把「单价 / 单品折扣」在退货模式下改为只读，避免改了没反应的假入口；
+        //   整单折扣仍可手填（那是「协商让利」的口子，与行级历史价不冲突）。
+        versionCode 66
+        versionName "5.7.8"
         vectorDrawables { useSupportLibrary true }
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——

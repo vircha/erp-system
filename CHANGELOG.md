@@ -2,6 +2,101 @@
 
 > 本文件由 AI 每次改动后自动追加，倒序排列（最新在最上）。
 
+## 2026-10-30 — v5.7.8：客户退货金额+折扣按历史成交价（服务端强制 + 两端前端只读）
+
+### 经理需求原文
+> `客户退货金额+折扣也要按照历史金额+折扣 现在好像是没有`
+
+### 一、实测取证：四条退货路径**全都没按历史取价**
+
+改之前逐条实测（生产库临时套账，不碰真实数据）：
+
+| 路径 | 接口 | 原行为 | 后果 |
+|---|---|---|---|
+| ① 手工退货单 | `POST /api/orders`（`type='return'`） | 完全采信报文 `price`/`discount` | 老客户端不带 `discount` → 折扣**直接丢失** |
+| ② 整张退货 | `POST /api/orders/:id/return` | `INSERT` 只插 **11 列**，漏 `discount`/`orig_price` | 历史折扣**彻底丢库**（最直接实锤） |
+| ③ 部分退货 | `POST /api/orders/:id/return-items` | `it.price !== undefined ? it.price : orig.price` → 报文优先 | 可改价，且不取历史折扣 |
+| ④ 编辑退货单 | `PUT /api/orders/:id` | 同上，报文 `it.price`/`it.discount` 优先 | 可改价改折扣 |
+
+「按历史」的原始诉求是**门店/客户的历史成交价 + 历史单品折扣**（`customer_prices` 表：
+`price` = 折前单价，`discount` = 单品折扣），而不是商品表的基础价。
+
+### 二、服务端：新增统一取价 helper（`server.js`）
+
+```js
+function resolveReturnPrice(bookId, customerId, productId, prodPrice, snaps) { ... }
+function returnLineCalc(rp, qty) { ... }
+```
+
+**历史来源优先级**：
+
+1. **快照行**（原销售单明细 / 退货单自身明细）—— 最权威
+   - 折前价 = `orig_price`（老单无此列 → 退回 `price`）
+   - 成交价 = 快照里的 `price`（**原样取，不重算**）
+   - 单品折扣 = `discount`，但只在「折前 × 折扣 ≈ 成交价」（容差 0.02）时才保留
+     → 不自洽说明这行数据本就错位，宁可按折扣 1 处理，也**不能二次打折**
+2. **门店历史价** `customer_prices`（`price` = 折前单价，`discount` = 单品折扣）
+3. **商品基础价** `products.price`，折扣 1
+
+🔴 快照行的 `price=0`（赠品）也按 0 退，**绝不穿透**到 `customer_prices` 取一个非零历史价
+—— 否则退货金额会和原单对不上。
+
+**四条路径全部改走这个 helper**（报文里的 `price`/`discount` 一律忽略）：
+
+- ① `POST /api/orders`：`isReturn` 分支优先于 `_forceStorePrice`，走 `resolveReturnPrice(..., [])` + `returnLineCalc`
+- ② `POST /api/orders/:id/return`：`INSERT` 补齐 `discount` / `orig_price` 两列
+- ③ `POST /api/orders/:id/return-items`：改用 `orig`（原销售单明细快照）取价，金额不再来自报文
+- ④ `PUT /api/orders/:id`：新增 `retOrigByPid`（按 `return_of` 反查**原销售单**明细）→ 取价优先级
+  `原销售单快照 > 退货单自身快照 > 门店历史价 > 商品价`
+
+### 三、两端前端：退货模式下「单价 / 单品折扣」改只读
+
+服务端改完后，报文里的 `price`/`discount` **改了也没用**。若前端还留着可编辑的输入框，
+用户会看到「我改了金额，怎么没变」→ 只能改成只读，并明确告诉他为什么。
+
+**网页版**（`public/js/app.js`）：
+
+- `_roPrice` 从 `(ME.role === 'customer')` 改为 `(ME.role === 'customer') || isReturnMode()`
+- `title` 文案分流：客户 → 「单价按本店历史价，不能修改」/ 退货 → 「退货单价按历史成交价，不能修改」
+- 整单折扣（`sale-discount`）**仍可手填** —— 那是「协商让利」的口子，与行级历史价不冲突
+
+**手机端**（`SaleScreen.kt`）：
+
+- 购物车行点击入口：`.clickable(enabled = !SessionStore.isCustomer && !isReturn)`
+  （退货模式下点不开明细弹窗 —— 那里能改单价）
+- 单品折扣框：`readOnly = SessionStore.isCustomer || isReturn`
+- 提示文案分流：客户 → 「单价与折扣按本店历史价带出，不能修改；数量可改」
+  / 退货 → 「退货单价与折扣按历史成交价带出，不能修改；数量可改」
+- 数量照常可改（行尾加减按钮 + 数字框都在），删除按钮也在行尾
+
+### 四、验证
+
+**本地隔离回归**（临时端口 + 临时 DB，5 大场景）：`ALL_PASS`
+
+**生产回归**（临时套账 `ZZ_TMP_RETPRICE_578`，跑完即删，绝不碰生产数据）：**PASS=38 / FAIL=0**
+
+| 场景 | 篡改报文 | 实际落库 | 结论 |
+|---|---|---|---|
+| 手工退货单 | `price=0.01, discount=0.1` | `price=72, orig_price=80, discount=0.9, subtotal=-144` | 按历史 ✅ |
+| 整张退货 | — | `price=72, orig_price=80, discount=0.9` | 折扣不再丢库 ✅ |
+| 部分退货 | `price=0.01` | `price=18, orig_price=20, discount=0.9` | 按原单快照 ✅ |
+| 编辑退货单 | `price=0.01, discount=0.1, qty=3` | `price=72, orig_price=80, discount=0.9, subtotal=-216` | 按原销售单快照 ✅ |
+| 销售单回归 | — | `total=11 → PUT 后 12` | 不受影响 ✅ |
+| 客户隔离 | — | 客户提交退货 403；下单 `total=144, price=72` | 不受影响 ✅ |
+
+**手机端**：`assembleRelease` + R8 构建通过，`aapt dump badging` 确认
+`versionCode=66 / versionName=5.7.8`，签名 SHA-256 与上一版一致（`4c4229b9…`，可覆盖安装）。
+
+### 五、附带的工程规范沉淀
+
+- 🔴 **补丁脚本必须与落地代码逐字一致**：本轮把 `_patch_retprice_578.py` 重写为与 `server.js`
+  实际落地完全对齐，并用「线上基线重跑 → sha256 逐字节比对」做自检（`184fa69d…`），
+  证明脚本零漂移。多轮精修只改代码不同步脚本，会导致重跑得到不同结果。
+- 🔴 **回归脚本的历史价陷阱（同一问题第二次踩）**：销售单回归若复用同一个商品开单，
+  `recordCustomerPrices` 会把该商品的历史价覆盖掉 → 后面「按历史价」断言必假阴性。
+  → 销售单回归必须用**独立商品**。已写进脚本注释。
+
+
 ## 2026-10-29 — v5.7.7：修复「退货订单无法编辑」（网页版 + 手机端同步）
 
 ### 经理需求原文

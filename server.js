@@ -467,6 +467,73 @@ function lineCalc(origPrice, qty, disc) {
   return { price, orig_price: +(Number(origPrice) || 0).toFixed(2), discount: d, subtotal: +(price * (Number(qty) || 0)).toFixed(2) };
 }
 
+// ---------- 退货取价：统一按「历史金额 + 历史折扣」（2026-10-30 经理需求） ----------
+// 需求原文：「客户退货金额+折扣也要按照历史金额+折扣 现在好像是没有」
+//
+// 🔴 之前四条退货路径各自算价，口径不一致：
+//   ① 手工退货单（POST /api/orders type='return'）→ 完全采信报文 price/discount，
+//      老客户端不带 discount 时折扣直接丢失；
+//   ② 整张退货（POST /api/orders/:id/return）→ INSERT 少 discount/orig_price 两列
+//      → 历史折扣彻底丢库（这就是经理看到「没按历史」的最直接实锤）；
+//   ③ 部分退货（POST /api/orders/:id/return-items）→ it.price 报文优先，可改价；
+//   ④ 编辑退货单（PUT /api/orders/:id）→ it.price 报文优先，可改价。
+//
+// ✅ 统一口径：退货的**折前单价与单品折扣一律取历史**，报文里的 price/discount 只作参考不生效。
+//   历史来源优先级：
+//     1) 快照行（原销售单明细 / 退货单自身明细）：有 orig_price → 成交价 = 折前 × 折扣
+//     2) 门店历史价 customer_prices（price=折前单价，discount=单品折扣）
+//     3) 商品基础价 products.price，折扣 1
+//   🔴 老单只有 price 没有 orig_price → 视作「折前价 + 折扣 1」，不二次打折。
+function resolveReturnPrice(bookId, customerId, productId, prodPrice, snaps) {
+  const cands = Array.isArray(snaps) ? snaps.filter(Boolean) : (snaps ? [snaps] : []);
+  for (const s of cands) {
+    const p = Number(s.price);
+    const op = Number(s.orig_price);
+    const dRaw = Number(s.discount);
+    const d = (isFinite(dRaw) && dRaw > 0) ? Math.min(1, Math.max(0.1, dRaw)) : 1;
+    // 🔴 快照行是**权威**：哪怕它 price=0（赠品），也必须按 0 退，
+    //    绝不能穿透到 customer_prices 取一个非零历史价 → 那会让退货金额与原单对不上。
+    const base = (isFinite(op) && op > 0) ? op : (isFinite(p) ? p : 0);
+    // 折扣只在「折前 × 折扣 ≈ 成交价」时保留（自洽校验）。
+    // 不自洽说明这行 orig_price/price 本来就错位（老数据没有 orig_price 列），
+    // 宁可把折扣按 1 处理，也不能把金额算错或二次打折。
+    const selfConsistent = (isFinite(op) && op > 0 && isFinite(p)) && Math.abs(op * d - p) < 0.02;
+    return {
+      orig_price: base,
+      discount: selfConsistent ? d : 1,
+      price: isFinite(p) ? p : 0,
+      source: 'snapshot',
+    };
+  }
+  // 无快照 → 门店历史价（customer_prices：price=折前单价，discount=单品折扣）
+  if (customerId && productId) {
+    const cp = db.prepare('SELECT price, discount FROM customer_prices WHERE book_id=? AND customer_id=? AND product_id=?')
+      .get(bookId, customerId, productId);
+    if (cp) {
+      const op = Number(cp.price);
+      const dRaw = Number(cp.discount);
+      const d = (isFinite(dRaw) && dRaw > 0) ? Math.min(1, Math.max(0.1, dRaw)) : 1;
+      if (isFinite(op) && op > 0) {
+        return { orig_price: op, discount: d, price: lineCalc(op, 1, d).price, source: 'store' };
+      }
+    }
+  }
+  const pp = Number(prodPrice) || 0;
+  return { orig_price: pp, discount: 1, price: pp, source: 'base' };
+}
+
+// 用 resolveReturnPrice 的结果组装一行明细（成交单价直接用历史值，不重算）
+function returnLineCalc(rp, qty) {
+  const q = Number(qty) || 0;
+  const price = Number(rp.price) || 0;
+  return {
+    price,
+    orig_price: Number(rp.orig_price) || 0,
+    discount: Number(rp.discount) || 1,
+    subtotal: +(price * q).toFixed(2),
+  };
+}
+
 // ---------- 工具 ----------
 // 下单日期口径：与前端 <input type="date"> 的 value 格式一致（YYYY-MM-DD）。
 // 🔴 不能用 ymdToday()：那是 YYYYMMDD（8 位），塞进 orders.order_date 会跟前端筛选对不上。
@@ -1712,7 +1779,14 @@ async function handleApi(req, res, u) {
       // 单品折扣：it.price 视为「折前单价」，乘 it.discount 得成交单价。
       // 不传 discount 的行按 1 处理（不打折），所以「有的单品有折扣，有的没有」天然支持。
       let c;
-      if (_forceStorePrice) {
+      if (isReturn) {
+        // 🔴🔴 2026-10-30 经理需求：退货的**金额与折扣按历史**，报文里的 price/discount 一律忽略。
+        //   业务员代客开退货单时，前端送来的就是该门店的历史成交价（折前）+ 历史单品折扣，
+        //   这里服务端再强制一次：① 防篡改 ② 老客户端不带 discount 时不丢折扣。
+        //   口径与前端 priceFor()/itemDiscFor() 完全一致（都是 customer_prices：price=折前）。
+        const rp = resolveReturnPrice(bookId, b.customer_id, prod.id, Number(prod.price) || 0, []);
+        c = returnLineCalc(rp, qty);
+      } else if (_forceStorePrice) {
         // 客户角色：报文里的 it.price / it.discount **一律忽略**
         const cp = db.prepare('SELECT price, discount FROM customer_prices WHERE book_id=? AND customer_id=? AND product_id=?')
                     .get(bookId, b.customer_id, prod.id);
@@ -1993,6 +2067,15 @@ async function handleApi(req, res, u) {
     const prevRows = db.prepare('SELECT product_id, product_name, spec, barcode, unit, cost, price, orig_price, discount FROM order_items WHERE order_id=?').all(m[1]);
     const prevByPid = new Map();
     for (const pi of prevRows) if (pi.product_id != null && !prevByPid.has(pi.product_id)) prevByPid.set(pi.product_id, pi);
+    // 🔴🔴 2026-10-30 经理需求：编辑退货单时金额+折扣也要按历史。
+    //   历史来源优先级：① **原销售单明细**（return_of 指向的那张单，最权威）
+    //                    ② 退货单自身明细快照（prev）③ 门店历史价 ④ 商品基础价。
+    //   报文里的 it.price / it.discount 一律忽略（改价改折扣都改不动金额）。
+    const retOrigByPid = new Map();
+    if (isReturnEdit && o.return_of) {
+      const _ro = db.prepare('SELECT product_id, price, orig_price, discount FROM order_items WHERE order_id=?').all(o.return_of);
+      for (const r of _ro) if (r.product_id != null && !retOrigByPid.has(r.product_id)) retOrigByPid.set(r.product_id, r);
+    }
     for (const it of b.items) {
       const pid = Number(it.product_id);
       const prev = prevByPid.get(pid) || null;
@@ -2004,7 +2087,13 @@ async function handleApi(req, res, u) {
       const prevBase = prev ? (Number(prev.orig_price) > 0 ? Number(prev.orig_price) : Number(prev.price)) : 0;
       const fallbackPrice = prevBase > 0 ? prevBase : (prod ? Number(prod.price) || 0 : 0);
       let c;
-      if (it.discount != null) {
+      if (isReturnEdit) {
+        // 🔴 退货单编辑：金额/折扣按历史快照（报文 price/discount 忽略）
+        const rp = resolveReturnPrice(bookId, b.customer_id, pid,
+          prod ? (Number(prod.price) || 0) : 0,
+          [retOrigByPid.get(pid) || null, prev]);
+        c = returnLineCalc(rp, qty);
+      } else if (it.discount != null) {
         c = lineCalc(it.price !== undefined ? it.price : fallbackPrice, qty, it.discount);
       } else {
         const p0 = Number(it.price !== undefined ? it.price : fallbackPrice) || 0;
@@ -2132,7 +2221,12 @@ async function handleApi(req, res, u) {
       const ri = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,return_of) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rno, o.customer_id, o.customer_name, -o.total, -pay, o.discount != null ? o.discount : 1, ymd, 'returned', '销售退货 ' + o.order_no, o.id);
       const rid = ri.lastInsertRowid;
       for (const it of items) {
-        db.prepare('INSERT INTO order_items(book_id,order_id,product_id,product_name,spec,barcode,unit,qty,price,cost,subtotal) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(bookId, rid, it.product_id, it.product_name, it.spec, it.barcode || '', it.unit, -it.qty, it.price, it.cost || 0, -it.subtotal);
+        // 🔴🔴 2026-10-30 修：这里原来只插 11 列，**漏掉 discount / orig_price** →
+        //   整张退货单的历史单品折扣彻底丢库（经理报「退货折扣没按历史」的直接实锤）。
+        //   现在补齐：折前价 + 单品折扣取原单快照（老单无 orig_price 时退回 price、折扣按 1），
+        //   成交价沿用原单已存的 price（历史金额原样，绝不重算）。
+        const rp = resolveReturnPrice(bookId, o.customer_id, it.product_id, 0, [it]);
+        db.prepare('INSERT INTO order_items(book_id,order_id,product_id,product_name,spec,barcode,unit,qty,price,cost,subtotal,discount,orig_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(bookId, rid, it.product_id, it.product_name, it.spec, it.barcode || '', it.unit, -it.qty, rp.price, it.cost || 0, -it.subtotal, rp.discount, rp.orig_price);
         if (it.product_id) db.prepare("UPDATE inventory SET qty=qty+?, updated_at=datetime('now','localtime') WHERE product_id=?").run(it.qty, it.product_id);
       }
       db.exec('COMMIT');
@@ -2185,9 +2279,14 @@ async function handleApi(req, res, u) {
       const already = row ? (Number(row.s) || 0) : 0;
       const remaining = +(orig.qty - already).toFixed(3);
       if (qty > remaining + 1e-9) return sendJSON(res, 400, { error: '退货数量超过可退数量: ' + orig.product_name + ' (已退 ' + already + ', 剩 ' + remaining + ')' });
-      const price = Number(it.price !== undefined ? it.price : orig.price);
-      const subtotal = +(price * qty).toFixed(2); total += subtotal;
-      lines.push({ orig, qty, price, subtotal });
+      // 🔴🔴 2026-10-30 修：原来 `it.price !== undefined ? it.price : orig.price` → 报文可改价。
+      //   现在强制按**原销售单明细的历史快照**算：成交单价 = 原单已存的成交价（历史金额原样），
+      //   折前价 = orig.orig_price（老单退回 orig.price），单品折扣 = orig.discount（自洽才保留）。
+      const rp = resolveReturnPrice(bookId, o.customer_id, pid, 0, [orig]);
+      const c = returnLineCalc(rp, qty);
+      const price = c.price;
+      const subtotal = c.subtotal; total += subtotal;
+      lines.push({ orig, qty, price, subtotal, rp });
     }
     total = +total.toFixed(2);
     const discount = o.discount != null ? o.discount : 1;
@@ -2200,7 +2299,8 @@ async function handleApi(req, res, u) {
       const ri = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,return_of) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rno, o.customer_id, o.customer_name, -total, -payable, discount, ymd, 'returned', '销售退货 ' + o.order_no, o.id);
       const rid = ri.lastInsertRowid;
       for (const L of lines) {
-        db.prepare("INSERT INTO order_items(book_id,order_id,product_id,product_name,spec,barcode,unit,qty,price,cost,subtotal,discount,orig_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rid, L.orig.product_id, L.orig.product_name, L.orig.spec, L.orig.barcode || '', L.orig.unit, -L.qty, L.price, L.orig.cost || 0, -L.subtotal, Number(L.orig.discount) || 1, Number(L.orig.orig_price) || L.price);
+        // 🔴 折扣/折前价统一取 resolveReturnPrice 的结果（快照优先 → 门店历史价 → 商品价）
+        db.prepare("INSERT INTO order_items(book_id,order_id,product_id,product_name,spec,barcode,unit,qty,price,cost,subtotal,discount,orig_price) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rid, L.orig.product_id, L.orig.product_name, L.orig.spec, L.orig.barcode || '', L.orig.unit, -L.qty, L.price, L.orig.cost || 0, -L.subtotal, L.rp.discount, L.rp.orig_price);
         if (L.orig.product_id) db.prepare("UPDATE inventory SET qty=qty+?, updated_at=datetime('now','localtime') WHERE product_id=?").run(L.qty, L.orig.product_id);
       }
       db.exec('COMMIT');
