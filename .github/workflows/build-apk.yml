@@ -162,7 +162,9 @@ jobs:
           VN="${{ steps.art.outputs.vn }}"
           NOTES="RELEASE_NOTES_v${VN}.md"
           if [ -f "$NOTES" ]; then
-            cp "$NOTES" RELEASE_BODY.md
+            # 🔴 剥掉文件顶部的「写法说明」注释块（以 > 开头的引用行 + 紧随的空行），
+            #    那些是给维护者看的规范，不该出现在给访客看的 Release 正文里。
+            sed '/^>/d' "$NOTES" | sed '/./,$!d' > RELEASE_BODY.md
             echo "使用说明文件 $NOTES"
           else
             {

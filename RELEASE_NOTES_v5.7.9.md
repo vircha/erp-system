@@ -1,4 +1,4 @@
-# Release 说明（模块功能情况 + 本版更新）
+# v5.7.9（versionCode 67）
 
 > 🔴 本文件由 CI 在创建 GitHub Release 时读取（`.github/workflows/build-apk.yml` 的 `body_path`）。
 > 🔴 规范：**只写「模块功能情况」+「本版更新」+「关于附件」，不写开发历史**
