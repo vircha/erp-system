@@ -153,24 +153,35 @@ jobs:
           echo "vc=$VC" >> "$GITHUB_OUTPUT"
           echo "vn=$VN" >> "$GITHUB_OUTPUT"
 
+      # 🔴 Release 正文从仓库里的说明文件读（RELEASE_NOTES_v<版本号>.md），
+      #    规范见 README「Release 说明怎么写」：只写模块功能情况 + 本版更新 + 关于附件，
+      #    不写开发历史。找不到对应文件时回退到内置模板（不阻断发版）。
+      - name: 准备 Release 正文
+        id: body
+        run: |
+          VN="${{ steps.art.outputs.vn }}"
+          NOTES="RELEASE_NOTES_v${VN}.md"
+          if [ -f "$NOTES" ]; then
+            cp "$NOTES" RELEASE_BODY.md
+            echo "使用说明文件 $NOTES"
+          else
+            {
+              echo "自动构建产物：versionName \`${VN}\` / versionCode \`${{ steps.art.outputs.vc }}\`"
+              echo
+              echo "⚠️ **演示包** —— Android 自动 debug 签名，装得上能跑，但连的是占位域名 \`erp.example.com\`，**连不上任何真实服务器**。仅供验证界面与功能，不能当正式版用。"
+              echo
+              echo "详见 README「手机版」一节。之所以不在 CI 出正式包：Release 里的 APK"
+              echo "谁都能下载，而 APK 必然带着服务器地址，等于把地址公开了。"
+            } > RELEASE_BODY.md
+            echo "未找到 $NOTES，使用内置模板"
+          fi
+          wc -l RELEASE_BODY.md
+
       - name: 创建 Release 并上传 APK
         uses: softprops/action-gh-release@v2
         env:
           HAS_KS: ${{ steps.ks.outputs.has_ks }}
         with:
           name: v${{ steps.art.outputs.vn }}（versionCode ${{ steps.art.outputs.vc }}）
-          body: |
-            自动构建产物：versionName `${{ steps.art.outputs.vn }}` / versionCode `${{ steps.art.outputs.vc }}`
-
-            ${{ env.HAS_KS == 'true' && '✅ **正式签名包** —— 使用仓库 Secret 中的签名密钥，可覆盖安装线上版本。' || '⚠️ **演示包** —— Android 自动 debug 签名，装得上能跑，但连的是占位域名 `erp.example.com`，**连不上任何真实服务器**。仅供验证界面与功能，不能当正式版用。' }}
-
-            **要能正常用的包，请在本机出：**
-
-            ```bash
-            cp build.local.env.example build.local.env   # 填真实地址 + 签名
-            ./build-apk.sh
-            ```
-
-            详见 README「手机版」一节。之所以不在 CI 出正式包：Release 里的 APK
-            谁都能下载，而 APK 必然带着服务器地址，等于把地址公开了。
+          body_path: RELEASE_BODY.md
           files: erp-app.apk
