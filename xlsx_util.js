@@ -293,7 +293,8 @@ function buildTemplate() {
  * 数量单位 EA；每行末尾与最后一行均自动带 SUM 汇总公式（打开即算）。
  *
  * 列结构：A=产品名称 | B..N=各门店 | O=合计(EA) | P=合计（件数）
- *   「合计（件数）」= ROUNDUP(EA ÷ pack_size, 0)，即进位取整的箱数。
+ *   「合计（件数）」= ROUND(EA ÷ pack_size, 2)，即保留 2 位小数的箱数。
+ *   ⚠️ 2026-10-27 经理要求：不能进位取整（36÷24=1.5 要显示 1.5，不能显示 2）。
  *   pack_size=0（产品资料未维护装箱量）→ 该行件数留空，不写公式，
  *   避免算出 0 被当成「0 件」的真数字。
  *
@@ -344,9 +345,11 @@ function buildOrderTemplate(storeNames, productNames, prefill) {
     if (stores.length > 0) {
       let sumEA = 0; for (let c = 0; c < stores.length; c++) { const q = row[c + 1]; if (typeof q === 'number') sumEA += q; }
       row.push({ f: `SUM(B${rn}:${lastStoreCol}${rn})`, v: sumEA });            // 合计（EA）
-      // 件数 = 进位取整(EA / 每箱装量)。未维护装箱量（0）→ 留空不写公式。
+      // 件数 = EA / 每箱装量，保留 2 位小数（不再进位取整）。
+      // 🔴 2026-10-27 经理要求：36÷24 要显示 1.5，不能进位成 2。
+      // 未维护装箱量（0）→ 留空不写公式。
       row.push(p.packSize > 0
-        ? { f: `IF(${sumCol}${rn}=0,0,ROUNDUP(${sumCol}${rn}/${p.packSize},0))`, v: 0 }
+        ? { f: `IF(${sumCol}${rn}=0,0,ROUND(${sumCol}${rn}/${p.packSize},2))`, v: 0 }
         : null);
     }
     rows.push(row);
@@ -361,10 +364,9 @@ function buildOrderTemplate(storeNames, productNames, prefill) {
     }
     totalRow.push({ f: `SUM(${sumCol}2:${sumCol}${lastDataRn})`, v: 0 });   // 该列总计（不必绕行相加）
     // 件数总计 = **各行件数相加**。
-    // ⚠️ 不能写成 ROUNDUP(Σ(EA_i/箱_i), 0) —— ROUNDUP 不满足分配律，
-    //    那样算的是「总量凑一起再进位」，会比实际少算。
-    //    例：10÷8=1.25→2、10÷8=1.25→2，两行共 4 件；
-    //        若合并算 ROUNDUP(10/8+10/8)=ROUNDUP(2.5)=3 件，少 1 件。
+    // ⚠️ 不能写成 ROUND(Σ(EA_i/箱_i), 2) —— 先加后舍入与逐行舍入不一致。
+    //    例：10÷8=1.25、10÷8=1.25，逐行合计 2.50；
+    //        但 1÷3 这类循环小数逐行舍入会累积误差，故一律逐行相加。
     const pcRows = prods.map((p, i) => (p.packSize > 0 ? i + 2 : null)).filter(Boolean);
     totalRow.push(pcRows.length
       ? { f: 'SUM(' + pcRows.map(rn => `${pcsCol}${rn}`).join(',') + ')', v: 0 }
