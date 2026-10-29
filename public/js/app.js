@@ -3702,6 +3702,25 @@ if (d.trust_full) {
     INIT: [0x1B, 0x40], ALIGN_LEFT: [0x1B, 0x61, 0x00], ALIGN_CENTER: [0x1B, 0x61, 0x01],
     BOLD_ON: [0x1B, 0x45, 0x01], BOLD_OFF: [0x1B, 0x45, 0x00], BIG: [0x1B, 0x21, 0x30],
     NORMAL: [0x1B, 0x21, 0x00], CUT: [0x1D, 0x56, 0x00], CODPAGE_GBK: [0x1B, 0x74, 0x0F], LF: [0x0A],
+    // 🔴🔴 2026-10-29 经理报修「打印出来数字 6 和 8 太像了」。
+    //   根因：ESC/POS 内置 Font A = 12×24 点阵，「8」与「6」的差异**只有右上角那根 1 点宽竖笔画**，
+    //   48 列小票上数字区密集排布 → 快速扫视时容易串读。字库改不了
+    //   （Font B 9×17 更窄更密，更难分；自定义字模 GS ( k 机型固件兼容风险高）→ 只能从**打印方式**下手。
+    //   ✅ 三招（同时上）：① 数字区加竖线分区；② 整个数字区加粗（ESC E，竖画 1 点→2 点）；
+    //      ③ 合计「优惠后金额」用**横向 2 倍**大字。
+    //   🔴 倍宽指令选型（极易踩坑）：
+    //     `ESC ! 0x01` 是「选 Font B（9×17）」，**不是**横向 2 倍！ESC ! 的位定义在不同固件里
+    //     有多个流传版本（0x01/0x08/0x10 分别可能被解释成 Font B / 倍宽 / 倍高 / 下划线），
+    //     赌某个位组合 = 赌机型 → 本项目禁用未经验证的 ESC ! 位组合。
+    //     `GS ! 0x01` 的位定义**唯一且无歧义**：位0-3 = 宽度倍数(1-8)、位4-7 = 高度倍数(1-8)
+    //     → 0x01 = 宽×2、高×1（24×24）；复位用 `GS ! 0x00`。
+    //     为什么敢用 GS：本工程已在用 `GS ( k` 打 EAN-13 条码 → GS 指令族在本机可用可证。
+    //     好处：只变宽、**行高不变** → 不与下一行叠字、纸长不变、基线不跑。
+    //     宽度预算：Font A 一列 = 12 点 → 倍宽字符占 **2 列**（n2(pay).length * 2），精确可算。
+    //     退化保底：万一某机型不支持 GS !，只是字不变大，**不乱码、不破版**
+    //     （按 2 列预算 → 实际只占 1 列时右边短一点，绝不溢出到下一行）。
+    DOUBLE_W: [0x1D, 0x21, 0x01],
+    DOUBLE_OFF: [0x1D, 0x21, 0x00],
     // 进纸 n 点（ESC d n）：底部留白用，比堆LF 精确。80mm 机常见 203dpi，2cm ≈ 160 点
     FEED: n => [0x1B, 0x64, n]
   };
@@ -3714,9 +3733,15 @@ if (d.trust_full) {
   const feedTail2cm = b => feedTail(b, 20);
   // 纸宽（半角列数）：80mm 机型 = 48；若换 58mm 机型改成 32 即可
   const RCOLS = 48;
-  const R_QTYW = 6, R_PRICEW = 7, R_AMTW = 8;      // 数量 / 单价 / 金额 三列
-  const R_NUMW = R_QTYW + R_PRICEW + R_AMTW;       // 21
-  const R_LEFTW = RCOLS - R_NUMW;                  // 27，留给商品条码
+  // 🔴🔴 2026-10-29：与原生实打印（BtPrinter.kt）/网页版模板引擎（print_template.js）
+  //   统一为 4 列 + 2 条竖线分区：名称/条码区 | 数量 原价 特价 | 金额
+  //   48 列时 LEFT_W 18 + | 1 + 6 + 7 + 7 + | 1 + 8 = 48 ✓
+  //   「条码:」(5 列) + 13 位数字 = 18 列 → 条码仍与数字同行、不多占行。
+  const R_QTYW = 6, R_PRICEW = 7, R_SALEW = 7, R_AMTW = 8;   // 数量 / 原价 / 特价 / 金额
+  const R_NUMW = R_QTYW + R_PRICEW + R_SALEW + R_AMTW;       // 28
+  const R_SEPW = 2;                                          // 2 条竖线
+  const R_LEFTW = RCOLS - R_NUMW - R_SEPW;                   // 18，留给商品条码
+  const R_VBAR = '|';
   const DASHES = '-'.repeat(RCOLS);
   const EQEQ = '='.repeat(RCOLS);
   function fmt2(n) { try { return Number(n || 0).toFixed(2); } catch (e) { return '0.00'; } }
@@ -3816,7 +3841,11 @@ if (d.trust_full) {
     const wh = (isRet ? '入库仓库:' : '出库仓库:') + clipW(data.warehouse || '天河仓', 16);
     await b.text(rPad('经手人:' + clipW(data.handler || '', 12), RCOLS - wLen(wh)) + wh); b.raw(ESC.LF);
     await b.text(DASHES); b.raw(ESC.LF);
-    await b.text(rPad('序号 名称', R_LEFTW) + lPadN('数量', R_QTYW) + lPadN('单价', R_PRICEW) + lPadN('金额', R_AMTW)); b.raw(ESC.LF);
+    // 🔴 2026-10-29：数字区加 2 条竖线分区 + 整块加粗（6/8 一眼可辨）
+    b.raw(ESC.BOLD_ON);
+    await b.text(rPad('序号 名称', R_LEFTW) + R_VBAR + lPadN('数量', R_QTYW)
+      + lPadN('原价', R_PRICEW) + lPadN('特价', R_SALEW) + R_VBAR + lPadN('金额', R_AMTW));
+    b.raw(ESC.BOLD_OFF); b.raw(ESC.LF);
     await b.text(DASHES); b.raw(ESC.LF);
     const items = Array.isArray(data.items) ? data.items : [];
     let qtySum = 0;
@@ -3826,10 +3855,26 @@ if (d.trust_full) {
       qtySum += q;
       await b.text(clipW((i + 1) + ' ' + (it.name || ''), RCOLS)); b.raw(ESC.LF);
       const bc = String(it.barcode || '').trim();
+      // 原价 = 折前单价（it.orig_price）；老单没这字段时兜回成交价，绝不印 0.00
+      const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
       const amt = (it.subtotal != null && Number(it.subtotal) !== 0) ? Number(it.subtotal) : q * p;
-      await b.text(rPad(bc ? '条码:' + clipW(bc, R_LEFTW - 6) : '', R_LEFTW)
-        + lPadN(fmtQtyNum(q) + (it.unit || ''), R_QTYW) + lPadN(fmt2(p), R_PRICEW) + lPadN(fmt2(amt), R_AMTW));
-      b.raw(ESC.LF);
+      // 🔴 明细行整块加粗 —— 商品名里有数字（200ml/125g）、条码更是纯数字
+      b.raw(ESC.BOLD_ON);
+      // 🔴 LEFT_W = 18，「条码:」(5 列) + 13 位数字 = 18 列刚好放得下；
+      //    放不下就整行独放，绝不截断末位条码。
+      const nums = R_VBAR + lPadN(fmtQtyNum(q) + (it.unit || ''), R_QTYW)
+        + lPadN(fmt2(op), R_PRICEW) + lPadN(fmt2(p), R_SALEW)
+        + R_VBAR + lPadN(fmt2(amt), R_AMTW);
+      if (bc && wLen('条码:' + bc) > R_LEFTW) {
+        // 🔴 放不下 → 条码整行独放，绝不截断末位（条码错一位就扫不出来）
+        await b.text(clipW('条码:' + bc, RCOLS)); b.raw(ESC.LF);
+        await b.text(rPad('', R_LEFTW) + nums); b.raw(ESC.LF);
+      } else {
+        // 🔴 LEFT_W = 18，「条码:」+ 13 位数字 = 18 列刚好放下，不截断
+        await b.text(rPad(bc ? '条码:' + bc : '', R_LEFTW) + nums);
+        b.raw(ESC.LF);
+      }
+      b.raw(ESC.BOLD_OFF);
     }
     await b.text(DASHES); b.raw(ESC.LF);
     const before = Number(data.before_total != null ? data.before_total : (data.total || 0));
@@ -3837,9 +3882,26 @@ if (d.trust_full) {
     const saved = before - pay;
     const r1 = '合计折前金额:' + fmt2(before);
     await b.text(rPad('合计数量:' + fmtQtyNum(qtySum), RCOLS - wLen(r1)) + r1); b.raw(ESC.LF);
-    const r2 = '优惠后金额:' + fmt2(pay);
+    // 🔴 2026-10-29：最关键的「优惠后金额」用**倍宽大字**（GS ! 0x01 = 宽×2、高×1）。
+    //    只变宽、行高不变 → 不与下一行叠字、纸长不变；竖笔画被拉成 2 点宽 → 6/8 绝不混淆。
+    //    宽度按 2 列预算（倍宽字符占 2 列）；机型不支持 GS ! 时只是字不变大，不破版。
+    const savedTxt = '折扣优惠金额:' + fmt2(saved);
+    const payLabel = '优惠后金额:';
+    const payNum = fmt2(pay);
+    const payNumW = payNum.length * 2;
+    const rightW = wLen(payLabel) + payNumW;
+    const avail = RCOLS - rightW;
     b.raw(ESC.BOLD_ON);
-    await b.text(rPad('折扣优惠金额:' + fmt2(saved), RCOLS - wLen(r2)) + r2);
+    if (wLen(savedTxt) <= avail) {
+      await b.text(rPad(savedTxt, avail) + payLabel);
+    } else {
+      // 金额太长放不下 → 拆两行（折扣优惠金额一行、倍宽金额右对齐一行）
+      await b.text(savedTxt); b.raw(ESC.LF);
+      await b.text(rPad('', avail) + payLabel);
+    }
+    b.raw(ESC.DOUBLE_W);
+    await b.text(payNum);
+    b.raw(ESC.DOUBLE_OFF);
     b.raw(ESC.BOLD_OFF); b.raw(ESC.LF);
     await b.text(DASHES); b.raw(ESC.LF);
     await b.text('客户签收:____________________'); b.raw(ESC.LF);

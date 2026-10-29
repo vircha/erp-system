@@ -110,14 +110,51 @@
     //    数字区总宽从 21 份放大到 28 份：原「单价」7 份拆成 原价7 + 特价7，再加金额8。
     const SALE_W = Math.max(5, Math.round(numW * 7 / 28));
     const AMT_W = Math.max(5, numW - QTY_W - PRICE_W - SALE_W);
+    // 🔴🔴 2026-10-29：数字区加 **2 条竖线分区**，版式与原生实打印（BtPrinter.kt）、
+    //    网页版模板引擎（print_template.js）完全一致：
+    //       名称/条码区 | 数量 原价 特价 | 金额
+    //    竖线各占 1 个半角列，从左区（LEFT_W）里抠出来。
+    //    48 列时：LEFT_W 18 + | 1 + 6 + 7 + 7 + | 1 + 8 = 48 ✓
+    //    （LEFT_W 18 恰好放下「条码:」5 列 + 13 位数字 = 18 列，条码仍与数字同行、不多占行）
+    //    🔴 三套引擎的列宽算法必须同步，否则「预览」和「打印」会错位。
+    const mods = ((d && d.tpl && d.tpl.modules) || null);
+    const on = k => !mods || mods[k] !== false;
+    const hasA = on('qty') || on('price') || on('sale');   // 数量/原价/特价 组
+    const hasAmt = on('amount');                          // 金额 列
+    const SEP_W = (hasA || hasAmt ? 1 : 0) + (hasA && hasAmt ? 1 : 0);
     return {
       COLS, MM, PAPER_W, SIDE_MM, TAIL_MM, CONTENT_W, COL_W, FS, LH,
-      QTY_W, PRICE_W, SALE_W, AMT_W, LEFT_W: COLS - (QTY_W + PRICE_W + SALE_W + AMT_W),
-      mods: ((d && d.tpl && d.tpl.modules) || null)
+      QTY_W, PRICE_W, SALE_W, AMT_W, SEP_W, VBAR: '|',
+      LEFT_W: COLS - (QTY_W + PRICE_W + SALE_W + AMT_W) - SEP_W,
+      mods: mods
     };
   }
   /** 模块开关：没模板时全部按开启处理（等于旧行为） */
   function modOn(G, k) { return !G.mods || G.mods[k] !== false; }
+
+  /**
+   * 数字区分区段（与 print_template.js 的 numSegs 完全同规则）。
+   *
+   * 版式： 名称/条码区 | 数量 原价 特价 | 金额
+   *   · 第 1 条竖线：名称区与数字区之间（只要有数字列就有）
+   *   · 第 2 条竖线：数量/原价/特价组与金额列之间（两组都在才有）
+   *
+   * 🔴 与 print_template.js 的同名函数必须保持一致，否则「预览」和「打印」会错位。
+   */
+  function numSegs(G, vals) {
+    const hasA = modOn(G, 'qty') || modOn(G, 'price') || modOn(G, 'sale');
+    const hasAmt = modOn(G, 'amount');
+    const segs = [];
+    if (hasA || hasAmt) segs.push({ sep: true });
+    if (modOn(G, 'qty')) segs.push({ t: vals.qty, w: G.QTY_W });
+    if (modOn(G, 'price')) segs.push({ t: vals.price, w: G.PRICE_W });
+    if (modOn(G, 'sale')) segs.push({ t: vals.sale, w: G.SALE_W });
+    if (hasAmt) {
+      if (hasA) segs.push({ sep: true });
+      segs.push({ t: vals.amount, w: G.AMT_W });
+    }
+    return segs;
+  }
 
   /** 画布初始高度（1x px）。draw() 自己会返回实际墨迹底部（yEnd），
    *  这里先画在一张「足够高」的画布上，再用 yEnd + 2cm 反推裁剪——
@@ -217,6 +254,36 @@
         for (let c = 0; c < COLS; c += 2) ctx.fillRect(px(M + c * cw), px(yy), px(cw), th);
       }
     }
+    /**
+     * 🔴 2026-10-29：倍宽绘制（模拟 ESC/POS 的 `GS ! 0x01` = 宽×2、高×1）。
+     *
+     * Canvas 没有 ESC/POS 指令，但用 `ctx.scale(2,1)` 横向拉伸效果完全等价：
+     * 字号不变（→ 高度不变、行高不变、纸长不变），每个字符横向拉伸 2 倍、
+     * 正好占 2 个半角列（Courier 半角步进 0.6×字号 → 2×0.6×fs = 2 列）。
+     *
+     * 用途：合计「优惠后金额」的数字用倍宽大字 → 竖笔画被拉成 2 点宽，
+     * 「6」和「8」绝不混淆（本机热敏打印机 Font A 12×24 点阵下最细的 1 点竖易糊断）。
+     *
+     * @param str    文本
+     * @param baseY  基线（1x 坐标）
+     * @param startCol 起始列号（0 基）
+     */
+    function textWide(str, baseY, startCol, opt) {
+      opt = opt || {};
+      const size = (opt.fs || FS) * s;
+      const mono = '"Courier New",Menlo,Consolas,monospace';
+      let c = startCol;
+      for (const ch of String(str == null ? '' : str)) {
+        if (c + 2 > COLS) break;
+        ctx.save();
+        ctx.font = (opt.bold ? 'bold ' : '') + size + 'px ' + mono;
+        ctx.translate(px(M + c * cw), px(baseY));
+        ctx.scale(2, 1);                    // 横向 2 倍、高不变
+        ctx.fillText(ch, 0, 0);
+        ctx.restore();
+        c += 2;                            // 倍宽字符占 2 列
+      }
+    }
     function lf(n) { y += (n || 1) * LH * s; }
 
     // ---- 抬头 ----
@@ -238,12 +305,10 @@
 
     if (M_('sep2')) { rule('-'); lf(0.9); }
     if (M_('thead')) {
-      const num = [];
-      if (M_('qty')) num.push(padL('数量', QTY_W));
-      // 🔴 2026-10-18：左原价、右特价（管家婆版式）
-      if (M_('price')) { num.push(padL('原价', PRICE_W)); num.push(padL('特价', SALE_W)); }
-      if (M_('amount')) num.push(padL('金额', AMT_W));
-      text(padR((M_('idx') ? '序号 ' : '') + '名称', LEFT_W) + num.join(''));
+      // 🔴 2026-10-29：数字区加竖线分区 + 整块加粗（6/8 一眼可辨）
+      const segs = numSegs(G, { qty: '数量', price: '原价', sale: '特价', amount: '金额' });
+      const num = segs.map(s => s.sep ? G.VBAR : padL(s.t, s.w)).join('');
+      text(padR((M_('idx') ? '序号 ' : '') + '名称', LEFT_W) + num, { bold: true });
       lf(0.9);
     }
     if (M_('sep3') && M_('thead')) { rule('-'); lf(0.9); }
@@ -260,17 +325,20 @@
       const bc = M_('barcode') ? String(it.barcode || '').trim() : '';
       const amt = (it.subtotal != null && Number(it.subtotal) !== 0)
         ? Number(it.subtotal) : q * p;
-      const num = [];
-      if (M_('qty')) num.push(padL(fmtQty(q) + (it.unit || ''), QTY_W));
       // 🔴 2026-10-18：原「单价」列拆成 原价 / 特价。
       //    原价 = it.orig_price（折前），特价 = it.price（折后成交单价）。
       //    老单 orig_price 为 null 时兜回 p，绝不印 0.00。
       const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
-      if (M_('price')) { num.push(padL(fmt2(op), PRICE_W)); num.push(padL(fmt2(p), SALE_W)); }
-      if (M_('amount')) num.push(padL(fmt2(amt), AMT_W));
+      // 🔴 2026-10-29：明细数字区加竖线分区（与 print_template.js / BtPrinter.kt 同规则）
+      const segs = numSegs(G, {
+        qty: fmtQty(q) + (it.unit || ''),
+        price: fmt2(op), sale: fmt2(p), amount: fmt2(amt)
+      });
+      const num = segs.map(s => s.sep ? G.VBAR : padL(s.t, s.w)).join('');
 
       if (M_('name')) {
-        text(clip((M_('idx') ? (i + 1) + ' ' : '') + (it.name || ''), COLS));
+        // 🔴 2026-10-29：明细行整块加粗 —— 商品名里有数字（200ml/125g）、条码更是纯数字
+        text(clip((M_('idx') ? (i + 1) + ' ' : '') + (it.name || ''), COLS), { bold: true });
         lf(0.85);
       }
       // 🔴 经理要求（2026-10-15）：小票上只显示条码「数字」，不画条形码图形。
@@ -284,15 +352,15 @@
       const left = bc ? '条码:' + bc : '';
       if (M_('name') || bc) {
         if (bc && !bcFit) {
-          text(clip(left, COLS));          // 条码整行，不截断
+          text(clip(left, COLS), { bold: true });          // 条码整行，不截断
           lf(0.85);
-          if (num.length) { text(padR('', LEFT_W) + num.join(''), { cols: COLS }); lf(0.95); }
+          if (num.length) { text(padR('', LEFT_W) + num, { cols: COLS, bold: true }); lf(0.95); }
         } else {
-          text(padR(clip(left, LEFT_W), LEFT_W) + num.join(''), { cols: COLS });
+          text(padR(clip(left, LEFT_W), LEFT_W) + num, { cols: COLS, bold: true });
           lf(0.95);
         }
       } else if (num.length) {
-        text(padR('', LEFT_W) + num.join(''), { cols: COLS });
+        text(padR('', LEFT_W) + num, { cols: COLS, bold: true });
         lf(0.95);
       }
     });
@@ -306,16 +374,38 @@
     if (M_('qty_sum')) {
       const r = M_('before_total') ? ('合计折前金额:' + fmt2(before)) : '';
       const ls = '合计数量:' + fmtQty(qtySum);
-      text(r ? padR(ls, COLS - wOf(r)) + r : ls);
+      text(r ? padR(ls, COLS - wOf(r)) + r : ls, { bold: true });
       lf(0.95);
     }
     if (M_('saved') || M_('payable')) {
+      // 🔴 2026-10-29：最关键的「优惠后金额」用**倍宽大字**（模拟 ESC/POS 的 GS ! 0x01：
+      //    宽×2、高×1）→ 行高不变、纸长不变，但每个数字的竖笔画被拉成 2 点宽 → 6/8 绝不混淆。
+      //    与原生实打印 / 网页版 ESC 版式一致。
       const ls = M_('saved') ? ('折扣优惠金额:' + fmt2(saved)) : '';
       const r = M_('payable') ? ('优惠后金额:' + fmt2(pay)) : '';
-      text(r ? padR(ls, COLS - wOf(r)) + r : ls, { bold: true });
+      if (r) {
+        // 右半段：标签 + 倍宽数字（倍宽字符占 2 列）
+        const payNum = fmt2(pay);
+        const payNumW = payNum.length * 2;
+        const rightW = wOf('优惠后金额:') + payNumW;
+        const avail = COLS - rightW;
+        if (wOf(ls) <= avail) {
+          text(padR(ls, avail), { bold: true });
+          textWide('优惠后金额:', y, avail, { bold: true });
+          textWide(payNum, y, avail + wOf('优惠后金额:'), { bold: true });
+        } else {
+          text(ls, { bold: true });
+          lf(0.95);
+          text(padR('', avail), { bold: true });
+          textWide('优惠后金额:', y, avail, { bold: true });
+          textWide(payNum, y, avail + wOf('优惠后金额:'), { bold: true });
+        }
+      } else {
+        text(ls, { bold: true });
+      }
       lf(1);
     } else if (M_('before_total')) {
-      text('合计折前金额:' + fmt2(before)); lf(1);
+      text('合计折前金额:' + fmt2(before), { bold: true }); lf(1);
     }
     if (M_('sep4')) { rule('-'); lf(1); }
     if (M_('sign')) { text('客户签收:____________________'); lf(1); }

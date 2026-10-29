@@ -323,6 +323,19 @@ mark{background:#fff2a8;color:inherit;padding:0 1px;border-radius:2px;}
 /* 窄纸（58mm）时左列只有 18 列，13 位条码 + 数字列放不下会溢出裁掉末位。
    min-width:0 允许 flex 子项收缩，word-break 允许在数字中间断行，两条一起防截断。 */
 .receipt .line>span:first-child{min-width:0;overflow-wrap:anywhere;}
+/* 🔴🔴 2026-10-29 经理报修「打印出来数字 6 和 8 太像了」。
+   ESC/POS Font A = 12×24 点阵，「8」与「6」只差右上角那根 1 点宽竖笔画，
+   热敏纸 203dpi 下这根细竖容易糊断 → 「8」被看成「6」。
+   DOM 侧三招（与 ESC/POS 侧同一套思路）：
+     ① .rnum 整块**加粗** → 竖笔画由 1 点变 2 点；
+     ② .rc 用 ch 单位定宽（1 半角列 = 1ch）+ .rs 竖线分区 → 各列严格对齐，不串行；
+     ③ .rpay 合计金额用更大字号 + 加粗。
+   🔴 ch 单位是关键：Courier New 的 "0" 宽 = 0.6em，正好等于 ESC/POS Font A 的半角步进，
+      所以 DOM 打印的数字列与 ESC/POS 打印**逐列对齐**。 */
+.receipt .rnum{white-space:nowrap;font-weight:700;}
+.receipt .rnum .rc{display:inline-block;overflow:hidden;text-overflow:clip;vertical-align:bottom;}
+.receipt .rnum .rs{display:inline-block;width:1ch;text-align:center;vertical-align:bottom;font-weight:400;}
+.receipt .rpay{font-family:"Courier New",monospace;font-weight:700;letter-spacing:.5px;}
 .receipt .sep{border-top:1px dashed #000;margin:6px 0;}
 .receipt .small{font-size:11px;}
 .overlay-actions{display:flex;gap:10px;margin-top:12px;}

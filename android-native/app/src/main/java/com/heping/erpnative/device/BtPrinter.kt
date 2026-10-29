@@ -233,6 +233,35 @@ object EscPos {
     private val BOLD_OFF = byteArrayOf(0x1B, 0x45, 0x00)
     private val BIG = byteArrayOf(0x1B, 0x21, 0x30)
     private val NORMAL = byteArrayOf(0x1B, 0x21, 0x00)
+    /**
+     * 🔴🔴 2026-10-29 经理报修「打印出来数字 6 和 8 太像了」。
+     *
+     * 根因（点阵层面）：ESC/POS 内置 Font A = 12×24 点阵，
+     * 「8」与「6」的字形差异**只有右上角那一根 1 点宽竖笔画**
+     *（8 的上部是闭环、6 的上部右上角是空白）。热敏纸 203dpi 下这根细竖容易糊断，
+     * 于是「8」被看成「6」。字库本身没法改（Font B 9×17 更窄更密，更难分；
+     * 自定义字模 GS ( k 机型固件兼容风险高）→ 只能从**打印方式**上让它更好认。
+     *
+     * ✅ 三招（同时上）：
+     *   ① 数字区加竖线分区（名称/条码区 | 数量 原价 特价 | 金额）→ 不会串列；
+     *   ② 整个数字区加粗（ESC E）→ 竖笔画由 1 点变 2 点，「8」的右上竖不再糊断；
+     *   ③ 合计「优惠后金额」用**横向 2 倍**大字 → 最关键的金额一眼可辨。
+     *
+     * 🔴🔴 指令选型（极易踩坑，务必记住）：
+     *   - `ESC ! 0x01` = **选 Font B（9×17）**，不是横向 2 倍！ESC ! 的位定义在不同固件里
+     *     有多个流传版本（0x01 / 0x08 / 0x10 分别被解释成 Font B / 倍宽 / 倍高 / 下划线），
+     *     赌某个位组合 = 赌机型 → **本项目禁用未经验证的 ESC ! 位组合**。
+     *   - 横向 2 倍、高不变（24×24）用 **`GS ! 0x01`**：GS ! n 的位定义**唯一且无歧义**
+     *     —— 位0-3 = 宽度倍数(1-8)、位4-7 = 高度倍数(1-8) → 0x01 = 宽×2、高×1；
+     *     复位用 `GS ! 0x00`。
+     *   - 为什么敢用 GS：本文件**已经在用 GS ( k 打 EAN-13 条码**（GS 指令族在本机可用可证）。
+     *   - 关键好处：只变宽、**行高不变** → 不会跟下一行叠字、纸长不变、基线不跑。
+     *   - 宽度预算：Font A 一列 = 12 点 → 倍宽字符占 **2 列**（n2(pay).length * 2），精确可算。
+     *   - 退化保底：万一某机型不支持 GS !，只是字不变大，**不乱码、不破版**
+     *     （宽度按 2 列预算 → 实际只占 1 列时右边短一点，绝不会溢出到下一行）。
+     */
+    private val DOUBLE_W = byteArrayOf(0x1D, 0x21, 0x01)
+    private val DOUBLE_OFF = byteArrayOf(0x1D, 0x21, 0x00)
     private val CODPAGE_GBK = byteArrayOf(0x1B, 0x74, 0x0F)
     private val CUT = byteArrayOf(0x1D, 0x56, 0x00)
 
@@ -249,7 +278,25 @@ object EscPos {
     private const val SALE_W = 7         // 特价列（成交价）
     private const val AMT_W = 8
     private const val NUM_W = QTY_W + PRICE_W + SALE_W + AMT_W   // 28
-    private const val LEFT_W = COLS - NUM_W                       // 20
+    /**
+     * 数字区（数量/原价/特价/金额）+ 两条竖线分区。
+     * 版式： 名称/条码区 | 数量 原价 特价 | 金额
+     *   LEFT_W(18) + "|"(1) + 6 + 7 + 7 + "|"(1) + 8 = 48 ✓
+     * LEFT_W 从 20 降到 18 的原因：竖线要从左区抠 2 列出来，
+     * 而「条码:」(5 列) + 13 位数字 = 18 列 —— 正好一列不差放下，条码仍与数字同行、不多占行。
+     */
+    private const val SEP_W = 1
+    private const val VBAR = "|"
+    private const val LEFT_W = COLS - (SEP_W * 2 + NUM_W)      // 48 - 30 = 18
+
+    /**
+     * 🔴 2026-10-29：整个数字区（数量/原价/特价/金额）整块**加粗**（ESC E）。
+     * ESC E 是「打印增强」属性，固件实现为「同位置 + 右移 1 点重印」→ 竖画变 2 点宽，
+     * 正好补上「8」右上那根最细的 1 点竖 → 6/8 一眼可辨。
+     * ⚠️ 加粗**不改变字符前进量**，所以加粗整个数字区不会造成换行/错列。
+     *    旁证：本文件原来「折扣优惠金额 / 优惠后金额」整行（正好 48 列）就已用 BOLD_ON，
+     *    经理长期使用从未报合计行错位 → 该机 ESC E 不推进字符位。
+     */
 
     private val DASHES = "-".repeat(COLS)
     private val EQ = "=".repeat(COLS)
@@ -401,10 +448,13 @@ object EscPos {
 
         // ---- 表列头 ----
         // 🔴 2026-10-18：单价列拆成「原价 / 特价」两列（管家婆版式，左原价右特价）
+        // 🔴 2026-10-29：加 2 条竖线分区（数字区加粗），「6/8」不再串列
+        put(BOLD_ON)
         putLn(
-            padRight("序号 名称", LEFT_W) + padLeft("数量", QTY_W) +
-                padLeft("原价", PRICE_W) + padLeft("特价", SALE_W) + padLeft("金额", AMT_W)
+            padRight("序号 名称", LEFT_W) + VBAR + padLeft("数量", QTY_W) +
+                padLeft("原价", PRICE_W) + padLeft("特价", SALE_W) + VBAR + padLeft("金额", AMT_W)
         )
+        put(BOLD_OFF)
         put(gb(DASHES)); put(lf())
 
         // ---- 明细：名称一行 + （条码 + 数量/原价/特价/金额）一行 ----
@@ -417,18 +467,21 @@ object EscPos {
             val p = it.price               // 折后成交价 → 印在「特价」列
             val op = it.origOrPrice()      // 折前原价   → 印在「原价」列
             qtySum += q
+            // 🔴 2026-10-29：明细行整行加粗。
+            //    商品名里常有数字（200ml / 125g / 6 瓶），条码更是纯数字 → 同样要加粗。
+            put(BOLD_ON)
             putLn(clip("${i + 1} ${it.name}", COLS))
             val bc = (it.barcode ?: "").trim()
             // 金额一律按**特价**算（= 这张单真实成交额），与底部「优惠后金额」对得上
-            val nums = padLeft(fmtQty(q) + (it.unit ?: ""), QTY_W) +
+            val nums = VBAR + padLeft(fmtQty(q) + (it.unit ?: ""), QTY_W) +
                 padLeft(n2(op), PRICE_W) +
-                padLeft(n2(p), SALE_W) +
+                padLeft(n2(p), SALE_W) + VBAR +
                 padLeft(n2(q * p), AMT_W)
             // ⚠️ 经理要求（2026-10-15）：小票上只印条码「数字」，不印条形码图形。
             // 图形条码在热敏小票上又粗又占地方，实际没人扫，纯浪费纸。
             // 布局：左边「条码:1234...」紧贴序号列，右边数量/原价/特价/金额靠右。
             val left = if (bc.isEmpty()) "" else "条码:" + bc
-            // 🔴 64 列机型上 LEFT_W 只有 20，「条码:」+13 位数字 = 19 列刚好放得下；
+            // 🔴 LEFT_W = 18，「条码:」(5 列) + 13 位数字 = 18 列刚好放得下；
             //    放不下就整行独放，绝不截断末位条码。
             if (left.isNotEmpty() && width(left) > LEFT_W) {
                 putLn(clip(left, COLS))
@@ -436,6 +489,7 @@ object EscPos {
             } else {
                 putLn(padRight(clip(left, LEFT_W), LEFT_W) + nums)
             }
+            put(BOLD_OFF)
         }
 
         // ---- 合计（左列 + 右列，与纸质单一致的两栏）----
@@ -445,11 +499,29 @@ object EscPos {
         val pay = payable
         val saved = before - pay
         val r1 = "合计折前金额:" + n2(before)
-        putLn(padRight("合计数量:" + fmtQty(qtySum), COLS - width(r1)) + r1)
-        val r2 = "优惠后金额:" + n2(pay)
         put(BOLD_ON)
-        putLn(padRight("折扣优惠金额:" + n2(saved), COLS - width(r2)) + r2)
+        putLn(padRight("合计数量:" + fmtQty(qtySum), COLS - width(r1)) + r1)
+        // 🔴 2026-10-29：最关键的「优惠后金额」用**倍宽大字**（GS ! 0x01 → 24×24，字号 1 倍高、
+        //    2 倍宽），行高不变 → 纸长不变；但每个数字的竖笔画被拉成 2 点宽 → 6/8 绝不混淆。
+        val savedTxt = "折扣优惠金额:" + n2(saved)
+        val payLabel = "优惠后金额:"
+        val payNum = n2(pay)
+        val payNumW = payNum.length * 2          // 倍宽字符占 2 列（精确预算，绝不溢出）
+        val rightW = width(payLabel) + payNumW
+        val avail = COLS - rightW
+        if (width(savedTxt) <= avail) {
+            put(gb(padRight(savedTxt, avail)))
+            put(gb(payLabel))
+            put(DOUBLE_W); put(gb(payNum)); put(DOUBLE_OFF)
+        } else {
+            // 金额太长放不下 → 拆两行（折扣优惠金额一行、倍宽金额单独右对齐一行）
+            put(gb(savedTxt)); put(lf())
+            put(gb(padRight("", avail)))
+            put(gb(payLabel))
+            put(DOUBLE_W); put(gb(payNum)); put(DOUBLE_OFF)
+        }
         put(BOLD_OFF)
+        put(lf())
         put(gb(DASHES)); put(lf())
         putLn("客户签收:____________________")
         put(ALIGN_CENTER); putLn(clip(footer, COLS)); put(ALIGN_LEFT)
@@ -476,21 +548,32 @@ object EscPos {
         o.write(gb(clip(shop, 22))); o.write(NORMAL); o.write(gb(title)); o.write(lf()); o.write(ALIGN_LEFT)
         o.write(gb(DASHES)); o.write(lf())
         // 🔴 2026-10-18：与 receipt() 同步改成管家婆式「原价 / 特价」双列（左原价右特价）
-        o.write(gb(padRight("名称", LEFT_W) + padLeft("数量", QTY_W) + padLeft("原价", PRICE_W) + padLeft("特价", SALE_W))); o.write(lf())
+        // 🔴 2026-10-29：数字区加竖线分区 + 加粗（6/8 一眼可辨）
+        //    productList 没有「金额」列 → 用 3 条竖线把 4 列彻底分开：
+        //    名称区(25) + |(1) + 数量(6) + |(1) + 原价(7) + |(1) + 特价(7) = 48 ✓
+        val plLeft = COLS - (SEP_W * 3 + QTY_W + PRICE_W + SALE_W)   // 25
+        o.write(BOLD_ON)
+        o.write(
+            gb(
+                padRight("名称", plLeft) + VBAR + padLeft("数量", QTY_W) + VBAR +
+                    padLeft("原价", PRICE_W) + VBAR + padLeft("特价", SALE_W)
+            )
+        ); o.write(BOLD_OFF); o.write(lf())
         o.write(gb(DASHES)); o.write(lf())
         for (it in items) {
             o.write(gb(clip(it.name, COLS))); o.write(lf())
             val bc = (it.barcode ?: "").trim()
             val left = if (bc.isEmpty()) "" else "  " + bc
             // 注意：ESC/POS 小票文本禁用半角 ¥(U+00A5)——GBK 不可编码，打印会乱码；金额一律裸数字
+            o.write(BOLD_ON)
             o.write(
                 gb(
-                    padRight(clip(left, LEFT_W), LEFT_W) +
-                        padLeft(fmtQty(it.qty) + (it.unit ?: ""), QTY_W) +
-                        padLeft("%.2f".format(it.origOrPrice()), PRICE_W) +
+                    padRight(clip(left, plLeft), plLeft) + VBAR +
+                        padLeft(fmtQty(it.qty) + (it.unit ?: ""), QTY_W) + VBAR +
+                        padLeft("%.2f".format(it.origOrPrice()), PRICE_W) + VBAR +
                         padLeft("%.2f".format(it.price), SALE_W)
                 )
-            ); o.write(lf())
+            ); o.write(BOLD_OFF); o.write(lf())
         }
         o.write(gb(DASHES)); o.write(lf())
         o.write(gb("共 ${items.size} 项")); o.write(lf()); o.write(gb(clip(footer, COLS))); o.write(lf())

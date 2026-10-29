@@ -59,10 +59,22 @@ object ReceiptImage {
 
     private const val COLS = 48
     private const val QTY_W = 6
-    private const val PRICE_W = 7
+    private const val PRICE_W = 7        // 原价列（折前）
+    private const val SALE_W = 7         // 特价列（折后成交价）
     private const val AMT_W = 8
-    private const val NUM_W = QTY_W + PRICE_W + AMT_W
-    private const val LEFT_W = COLS - NUM_W
+    private const val NUM_W = QTY_W + PRICE_W + SALE_W + AMT_W   // 28
+
+    /**
+     * 🔴 2026-10-29：数字区竖线分区 + 数字加粗（解决「6 和 8 太像」）。
+     *
+     * 版式（与原生实打印 BtPrinter.kt 完全一致）：
+     *   LEFT_W(18) + "|"(1) + 数量(6) + 原价(7) + 特价(7) + "|"(1) + 金额(8) = 48 ✓
+     * LEFT_W 从 27 降到 18：竖线要从左区抠 2 列出来，
+     * 而「条码:」(5 列) + 13 位数字 = 18 列 —— 正好一列不差放下，条码仍与数字同行、不多占行。
+     */
+    private const val SEP_W = 1
+    private const val VBAR = "|"
+    private const val LEFT_W = COLS - (SEP_W * 2 + NUM_W)      // 48 - 30 = 18
 
     private fun isWide(ch: Char): Boolean {
         val k = ch.code
@@ -178,6 +190,33 @@ object ReceiptImage {
         fun text(str: String, bold: Boolean = false, sizePt: Float = fs,
                  align: String = "left", cols: Int = COLS) =
             textAt(str, y, bold, sizePt, align, cols)
+
+        /**
+         * 🔴 2026-10-29：倍宽绘制（模拟 ESC/POS 的 `GS ! 0x01` = 宽×2、高×1）。
+         *
+         * Canvas 没有 ESC/POS 指令，但 `Paint.textScaleX = 2f` 效果完全等价：
+         * 字号不变（→ 高度不变、行高不变、纸长不变），每个字符横向拉伸 2 倍、
+         * 正好占 2 个半角列（Courier 半角步进 0.6×字号 → 2×0.6×fs = 2 列）。
+         *
+         * 用途：合计「优惠后金额」的数字用倍宽大字 → 竖笔画被拉成 2 点宽，
+         * 「6」和「8」绝不混淆（本机热敏打印机 Font A 12×24 点阵下最细的 1 点竖易糊断）。
+         *
+         * @param startCol 起始列号（0 基）
+         */
+        fun textWide(str: String, baseY: Float, startCol: Int,
+                     bold: Boolean = true, sizePt: Float = fs) {
+            paint.isFakeBoldText = bold
+            paint.textSize = sizePt
+            paint.textScaleX = 2f
+            var c = startCol
+            for (ch in str) {
+                if (c + 2 > COLS) break
+                cv.drawText(ch.toString(), margin + c * colW, baseY, paint)
+                c += 2            // 倍宽字符占 2 列
+            }
+            paint.textScaleX = 1f
+            paint.textSize = sizePt
+        }
         fun rule(ch: Char) {
             val th = (0.25f * PX_PER_MM)
             if (ch == '=') {
@@ -206,7 +245,10 @@ object ReceiptImage {
         y += lh * 1.05f
 
         rule('-'); y += lh * 0.9f
-        text(padR("序号 名称", LEFT_W) + padL("数量", QTY_W) + padL("单价", PRICE_W) + padL("金额", AMT_W))
+        // 🔴 2026-10-29：与原生实打印同步 —— 加 2 条竖线分区，数字区不再串列
+        text(padR("序号 名称", LEFT_W) + VBAR + padL("数量", QTY_W) +
+            padL("原价", PRICE_W) + padL("特价", SALE_W) + VBAR + padL("金额", AMT_W),
+            bold = true)
         y += lh * 0.9f
         rule('-'); y += lh * 0.9f
 
@@ -219,28 +261,64 @@ object ReceiptImage {
             // 单价 price 服务端始终存正数（折后成交价），保持原样即可。
             val q = it.qty
             val p = it.price
+            // 原价 = 折前单价；服务端没给就退回成交价（与实打印 origOrPrice() 同口径）
+            val op = it.origPrice?.takeIf { it > 0.0 } ?: p
             val amt = if (it.subtotal != 0.0) it.subtotal else q * p
             qtySum += q
-            text(clip("${i + 1} ${it.productName}", COLS))
+            // 🔴 2026-10-29：明细整块加粗 —— 商品名里有数字（200ml/125g）、条码更是纯数字
+            text(clip("${i + 1} ${it.productName}", COLS), bold = true)
             y += lh * 0.85f
 
-            val nums = padL(fmtQty(q) + (it.unit ?: ""), QTY_W) +
-                padL(n2(p), PRICE_W) + padL(n2(amt), AMT_W)
+            val nums = VBAR + padL(fmtQty(q) + (it.unit ?: ""), QTY_W) +
+                padL(n2(op), PRICE_W) +
+                padL(n2(p), SALE_W) + VBAR +
+                padL(n2(amt), AMT_W)
             val bc = (it.barcode ?: "").trim()
             // 🔴 经理要求（2026-10-15）：只显示条码「数字」，不画条形码图形。
             // 图形在小票上又粗又占地方，实际没人扫，纯浪费纸。
-            // 布局：左边「条码:1234567890128」紧贴序号列，右边数量/单价/金额靠右。
+            // 布局：左边「条码:1234567890128」紧贴序号列，右边数量/原价/特价/金额靠右。
             val left = if (bc.isEmpty()) "" else "条码:" + bc
-            text(padR(clip(left, LEFT_W), LEFT_W) + nums)
+            // 🔴 LEFT_W = 18，「条码:」(5 列) + 13 位数字 = 18 列刚好放得下；
+            //    放不下就整行独放，绝不截断末位条码。
+            if (left.isNotEmpty() && wOf(left) > LEFT_W) {
+                text(clip(left, COLS), bold = true)
+                y += lh * 0.85f
+                text(padR("", LEFT_W) + nums, bold = true)
+            } else {
+                text(padR(clip(left, LEFT_W), LEFT_W) + nums, bold = true)
+            }
             y += lh * 0.95f
         }
 
         // 合计
         rule('-'); y += lh * 0.95f
         val saved = before - pay
-        text(padR("合计数量:" + fmtQty(qtySum), COLS - wOf("合计折前金额:" + n2(before))) + "合计折前金额:" + n2(before))
+        text(padR("合计数量:" + fmtQty(qtySum), COLS - wOf("合计折前金额:" + n2(before))) + "合计折前金额:" + n2(before),
+            bold = true)
         y += lh * 0.95f
-        text(padR("折扣优惠金额:" + n2(saved), COLS - wOf("优惠后金额:" + n2(pay))) + "优惠后金额:" + n2(pay), bold = true)
+        // 🔴 2026-10-29：最关键的「优惠后金额」用**倍宽大字**（模拟 GS ! 0x01：宽×2、高×1）
+        //    → 行高不变、纸长不变，但每个数字的竖笔画被拉成 2 点宽 → 6/8 绝不混淆。
+        //    与原生实打印同版式：左边「折扣优惠金额」，右边「优惠后金额: + 倍宽数字」；
+        //    宽度按 2 列预算，放不下就降级拆两行。
+        val savedTxt = "折扣优惠金额:" + n2(saved)
+        val payLabel = "优惠后金额:"
+        val payNum = n2(pay)
+        val payNumW = payNum.length * 2          // 倍宽字符占 2 列
+        val rightW = wOf(payLabel) + payNumW
+        val avail = COLS - rightW
+        if (wOf(savedTxt) <= avail) {
+            // 左半段用普通字重画（padR 补到 avail 列），标签 + 倍宽数字画在右半段
+            val leftPart = padR(savedTxt, avail)
+            text(leftPart, bold = true)
+            textWide(payLabel, y, avail, bold = true)
+            textWide(payNum, y, avail + wOf(payLabel), bold = true)
+        } else {
+            text(savedTxt, bold = true)
+            y += lh * 0.95f
+            text(padR("", avail), bold = true)
+            textWide(payLabel, y, avail, bold = true)
+            textWide(payNum, y, avail + wOf(payLabel), bold = true)
+        }
         y += lh
         rule('-'); y += lh
         text("客户签收:____________________"); y += lh

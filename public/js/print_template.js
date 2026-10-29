@@ -200,16 +200,70 @@
    *  🔴 2026-10-21：数字区从 21 份放大到 28 份 —— 原「单价」7 份拆成「原价」7 + 「特价」7，
    *     再加金额 8 份。与 receipt_preview.js（预览）的算法保持一致，
    *     🔴 两套引擎的列宽算法必须同步，否则「预览」和「打印」会错位。
-   *     比例 6:7:7:8 与 48 列时完全一致。 */
+   *     比例 6:7:7:8 与 48 列时完全一致。
+   *  🔴🔴 2026-10-29：数字区加 **2 条竖线分区**，版式与原生实打印完全一致：
+   *       名称/条码区 | 数量 原价 特价 | 金额
+   *     竖线各占 1 个半角列，从左区（LEFT_W）里抠出来。
+   *     48 列时：LEFT_W 18 + | 1 + 6 + 7 + 7 + | 1 + 8 = 48 ✓
+   *     （LEFT_W 18 恰好放下「条码:」5 列 + 13 位数字 = 18 列，条码仍与数字同行、不多占行） */
   function cols(t) {
-    const p = normalize(t).paper;
+    const T = normalize(t);
+    const p = T.paper;
+    const m = T.modules;
     const C = p.cols;
     const numW = Math.max(9, Math.round(C * 28 / 48));      // 与旧 48列→21 等比
     const q = Math.max(4, Math.round(numW * 6 / 28));
     const pr = Math.max(5, Math.round(numW * 7 / 28));       // 原价列
     const sale = Math.max(5, Math.round(numW * 7 / 28));     // 特价列（折后成交价）
     const a = Math.max(5, numW - q - pr - sale);
-    return { COLS: C, LEFT_W: C - (q + pr + sale + a), QTY_W: q, PRICE_W: pr, SALE_W: sale, AMT_W: a, NUM_W: q + pr + sale + a, paper: p };
+    // 🔴 竖线条数随模块开关动态算：
+    //   ① 名称区 | 数字区 —— 只要有数字列就有
+    //   ② 数量/原价/特价组 | 金额 —— 两组都在才有
+    //   （58mm 模板关了「原价」列，若固定算 2 条就会多留 1 列空隙）
+    const hasA = m.qty !== false || m.price || m.sale !== false;
+    const hasAmt = m.amount !== false;
+    const SEP_W = (hasA || hasAmt ? 1 : 0) + (hasA && hasAmt ? 1 : 0);
+    return {
+      COLS: C, LEFT_W: C - (q + pr + sale + a) - SEP_W,
+      QTY_W: q, PRICE_W: pr, SALE_W: sale, AMT_W: a,
+      NUM_W: q + pr + sale + a, SEP_W: SEP_W, VBAR: '|', paper: p
+    };
+  }
+
+  /**
+   * 数字区分区段（HTML / ESC 两个出口共用，Canvas 版在 receipt_preview.js 里对齐同一条规则）。
+   *
+   * 版式： 名称/条码区 | 数量 原价 特价 | 金额
+   *   · 第 1 条竖线：名称区与数字区之间（只要有数字列就有）
+   *   · 第 2 条竖线：数量/原价/特价组与金额列之间（两组都在才有）
+   *
+   * @returns {Array} 元素为 {sep:true} 或 {t:'文本', w:列宽}
+   */
+  function numSegs(C, m, vals) {
+    const hasA = m.qty !== false || m.price || m.sale !== false;   // 数量/原价/特价 组
+    const hasAmt = m.amount !== false;                             // 金额 列
+    const segs = [];
+    if (hasA || hasAmt) segs.push({ sep: true });
+    if (m.qty !== false) segs.push({ t: vals.qty, w: C.QTY_W });
+    if (m.price) segs.push({ t: vals.price, w: C.PRICE_W });
+    if (m.sale !== false) segs.push({ t: vals.sale, w: C.SALE_W });
+    if (hasAmt) {
+      if (hasA) segs.push({ sep: true });
+      segs.push({ t: vals.amount, w: C.AMT_W });
+    }
+    return segs;
+  }
+
+  /**
+   * 数字区的 DOM 版（HTML 出口专用）。
+   * 🔴 用 `ch` 单位定宽 → 1 个半角列 = 1ch（Courier New 的 "0" 宽度 = 0.6em，
+   *    恰好等于 ESC/POS Font A 的半角步进）→ DOM 打印的数字列与 ESC/POS 打印**逐列对齐**。
+   *    比原来「一串数字用空格分隔」强得多：原来各列宽度随内容飘，6 和 8 更容易串行看错。
+   */
+  function numHtml(C, m, vals) {
+    return numSegs(C, m, vals).map(s => s.sep
+      ? '<span class="rs">|</span>'
+      : '<span class="rc" style="width:' + s.w + 'ch">' + s.t + '</span>').join('');
   }
 
   const on = (t, k) => !!(normalize(t).modules)[k];
@@ -248,13 +302,8 @@
     if (m.sep2) sep();
     // 表头也要跟模块开关走，否则关掉「单价」后表头还印着「单价」，行里却没有单价列
     if (m.thead) {
-      const r = [];
-      if (m.qty !== false) r.push('数量');
-      // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
-      if (m.price) r.push('原价');
-      if (m.sale !== false) r.push('特价');
-      if (m.amount !== false) r.push('金额');
-      line('<span>序号 名称 / 条码</span>', '<span>' + r.join(' ') + '</span>', 'font-size:11px;color:#888');
+      const r = numHtml(C, m, { qty: '数量', price: '原价', sale: '特价', amount: '金额' });
+      line('<span>序号 名称 / 条码</span>', '<span class="rnum">' + r + '</span>', 'font-size:11px;color:#888');
     }
     if (m.sep3 && m.thead) sep();
 
@@ -268,21 +317,23 @@
       //    原价 = it.orig_price（折前），特价 = it.price（折后成交单价）。
       //    🔴 老单 orig_price 为 null 时兜回 p，绝不印 0.00。
       const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
-      const right = [m.qty ? esc(fmtQtyNum(q)) + esc(it.unit || '') : '',
-      m.price ? esc(fmt2(op)) : '', m.sale !== false ? esc(fmt2(p)) : '', m.amount ? esc(fmt2(amt)) : ''].filter(Boolean).join(' ');
+      const vals = {
+        qty: esc(fmtQtyNum(q)) + esc(it.unit || ''),
+        price: esc(fmt2(op)), sale: esc(fmt2(p)), amount: esc(fmt2(amt))
+      };
       const st = m.name ? '' : 'display:none';
-      o.push(`<div class="line" style="font-size:11px"${st}><span>${esc(name)}</span><span>${right}</span></div>`);
+      o.push(`<div class="line" style="font-size:11px"${st}><span>${esc(name)}</span><span class="rnum">${numHtml(C, m, vals)}</span></div>`);
       if (m.barcode && bc) {
-        const r2 = [m.qty ? esc(fmtQtyNum(q)) + esc(it.unit || '') : '',
-        m.price ? esc(fmt2(op)) : '', m.sale !== false ? esc(fmt2(p)) : '', m.amount ? esc(fmt2(amt)) : ''].filter(Boolean).join(' ');
-        o.push(`<div class="line" style="font-size:10.5px;color:#888"><span>${left}</span><span>${r2}</span></div>`);
+        o.push(`<div class="line" style="font-size:10.5px;color:#888"><span>${left}</span><span class="rnum">${numHtml(C, m, vals)}</span></div>`);
       }
     });
     if (m.sep3) sep();
     if (m.qty_sum) line('合计数量', esc(String(qtyShow)));
     if (m.before_total) line('合计折前金额', esc(fmt(before)));
     if (m.saved) line('折扣优惠金额', esc(fmt(Math.abs(saved))));
-    if (m.payable) line('优惠后金额', esc(fmt(pay)), 'font-size:15px;font-weight:700');
+    // 🔴 2026-10-29：合计「优惠后金额」用**大字 + 等宽加粗**（DOM 侧天然可放大），
+    //    数字竖笔画变粗 → 6/8 一眼可辨。ESC/POS 侧对应 GS ! 0x01 倍宽。
+    if (m.payable) line('优惠后金额', '<span class="rpay">' + esc(fmt(pay)) + '</span>', 'font-size:15px;font-weight:700');
     if (m.sign) line('客户签收', '＿＿＿＿＿＿');
     if (m.sep4) sep();
     // 🔴 经理要求「模块可以重复添加」：这里把 extra 里的自定义模块实例逐个渲染。
@@ -356,13 +407,12 @@
     }
     if (m.sep2) await put('-'.repeat(C.COLS));
     if (m.thead) {
-      const num = [];
-      if (m.qty) num.push(H.lPadN('数量', C.QTY_W));
-      // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
-      if (m.price) num.push(H.lPadN('原价', C.PRICE_W));
-      if (m.sale !== false) num.push(H.lPadN('特价', C.SALE_W));
-      if (m.amount) num.push(H.lPadN('金额', C.AMT_W));
-      await put(H.rPad('序号 名称', C.LEFT_W) + num.join(''));
+      // 🔴 2026-10-29：数字区加竖线分区 + 整块加粗（6/8 一眼可辨）
+      const segs = numSegs(C, m, { qty: '数量', price: '原价', sale: '特价', amount: '金额' });
+      const num = segs.map(s => s.sep ? C.VBAR : H.lPadN(s.t, s.w)).join('');
+      b.raw(H.ESC.BOLD_ON);
+      await put(H.rPad('序号 名称', C.LEFT_W) + num);
+      b.raw(H.ESC.BOLD_OFF);
     }
     if (m.sep3 && m.thead) await put('-'.repeat(C.COLS));
 
@@ -373,33 +423,39 @@
       const q = Number(it.qty || 0), p = Number(it.price || 0);
       qtySum += q;
       const amt = (it.subtotal != null && Number(it.subtotal) !== 0) ? Number(it.subtotal) : q * p;
+      // 🔴 2026-10-29：明细行整块加粗 —— 商品名里有数字（200ml/125g）、条码更是纯数字
+      b.raw(H.ESC.BOLD_ON);
       if (m.name) {
         await b.text(H.clipW(((m.idx ? (i + 1) + ' ' : '') + (it.name || '')), C.COLS)); b.raw(LF);
       }
       const bc = m.barcode ? String(it.barcode || '').trim() : '';
-      const num = [];
-      if (m.qty) num.push(H.lPadN(H.fmtQtyNum(q) + (it.unit || ''), C.QTY_W));
       // 🔴 2026-10-21：左原价、右特价（管家婆版式，与手机版小票一致）
       //    原价 = it.orig_price（折前），特价 = it.price（折后成交单价）。
       //    🔴 老单 orig_price 为 null 时兜回 p，绝不印 0.00（比没有原价更糟）。
       const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
-      if (m.price) num.push(H.lPadN(H.fmt2(op), C.PRICE_W));
-      if (m.sale !== false) num.push(H.lPadN(H.fmt2(p), C.SALE_W));
-      if (m.amount) num.push(H.lPadN(H.fmt2(amt), C.AMT_W));
-      // 🔴窄纸（58mm=32列，LEFT_W 只有 18）时，「条码:」+ 13 位数字放不进左列，
+      const segs = numSegs(C, m, {
+        qty: H.fmtQtyNum(q) + (it.unit || ''),
+        price: H.fmt2(op), sale: H.fmt2(p), amount: H.fmt2(amt)
+      });
+      const num = segs.map(s => s.sep ? C.VBAR : H.lPadN(s.t, s.w)).join('');
+      // 🔴窄纸（58mm=32列，LEFT_W 只有 11）时，「条码:」+ 13 位数字放不进左列，
       // clipW 会把末位截成「690120921289.」—— 条码错一位就扫不出来。
       // 规则：左列放不下完整条码时，条码独占一行（不截断），数量/金额另起一行靠右。
-      const bcFit = bc && (H.wLen(bc) <= Math.max(2, C.LEFT_W - 6));
+      // 🔴 判据必须是 wLen('条码:'+bc) 与 LEFT_W 直接比（原代码用 LEFT_W-6 留余量，
+      //    导致 48 列下「条码:」+13 位 = 18 列刚好放下却被误判放不下 → 白白多占一行）。
+      //    该判据现与 app.js 兜底版式、BtPrinter.kt 原生版式完全一致。
+      const bcFit = bc && (H.wLen('条码:' + bc) <= C.LEFT_W);
       if (bc) {
         if (bcFit) {
-          await b.text(H.rPad('条码:' + bc, C.LEFT_W) + num.join('')); b.raw(LF);
+          await b.text(H.rPad('条码:' + bc, C.LEFT_W) + num); b.raw(LF);
         } else {
           await put('条码:' + bc);
-          if (num.length) { await b.text(H.rPad('', C.LEFT_W) + num.join('')); b.raw(LF); }
+          if (num.length) { await b.text(H.rPad('', C.LEFT_W) + num); b.raw(LF); }
         }
       } else {
-        await b.text(H.rPad('', C.LEFT_W) + num.join('')); b.raw(LF);
+        await b.text(H.rPad('', C.LEFT_W) + num); b.raw(LF);
       }
+      b.raw(H.ESC.BOLD_OFF);
     }
     if (m.sep3) await put('-'.repeat(C.COLS));
     const before = Number(d.before_total != null ? d.before_total : (d.total || 0));
@@ -411,14 +467,38 @@
       await b.text(r1 ? H.rPad(ls, C.COLS - H.wLen(r1)) + r1 : ls); b.raw(LF);
     }
     if (m.saved) {
-      const r2 = m.payable ? ('优惠后金额:' + H.fmt2(pay)) : '';
+      // 🔴 2026-10-29：最关键的「优惠后金额」用**倍宽大字**（GS ! 0x01 = 宽×2、高×1）。
+      //    只变宽、行高不变 → 不会与下一行叠字、纸长不变；竖笔画被拉成 2 点宽 → 6/8 绝不混淆。
+      //    与原生实打印（app.js 兜底 / BtPrinter.kt）同一套指令、同一套宽度预算。
+      //    宽度按 2 列预算（倍宽字符占 2 列）；机型不支持 GS ! 时只是字不变大，不破版。
+      const payLabel = m.payable ? '优惠后金额:' : '';
+      const payNum = m.payable ? H.fmt2(pay) : '';
+      const payNumW = payNum.length * 2;            // 倍宽字符占 2 列（精确预算，绝不溢出）
+      const rightW = H.wLen(payLabel) + payNumW;
+      const avail = C.COLS - rightW;
       const ls = '折扣优惠金额:' + H.fmt2(saved);
       b.raw(H.ESC.BOLD_ON);
-      await b.text(r2 ? H.rPad(ls, C.COLS - H.wLen(r2)) + r2 : ls);
+      if (payLabel) {
+        // 同一行：左边「折扣优惠金额」，右边「优惠后金额:」+ 倍宽数字
+        if (H.wLen(ls) <= avail) {
+          await b.text(H.rPad(ls, avail) + payLabel);
+        } else {
+          // 金额太长放不下 → 拆两行（折扣优惠金额一行、倍宽金额右对齐一行）
+          await b.text(ls); b.raw(LF);
+          await b.text(H.rPad('', avail) + payLabel);
+        }
+        b.raw(H.ESC.DOUBLE_W);
+        await b.text(payNum);
+        b.raw(H.ESC.DOUBLE_OFF);
+      } else {
+        await b.text(ls);
+      }
       b.raw(H.ESC.BOLD_OFF); b.raw(LF);
     } else if (m.payable) {
       b.raw(H.ESC.BOLD_ON);
-      await b.text('优惠后金额:' + H.fmt2(pay)); b.raw(H.ESC.BOLD_OFF); b.raw(LF);
+      await b.text('优惠后金额:'); b.raw(H.ESC.DOUBLE_W);
+      await b.text(H.fmt2(pay)); b.raw(H.ESC.DOUBLE_OFF);
+      b.raw(H.ESC.BOLD_OFF); b.raw(LF);
     } else if (m.before_total) {
       await put('合计折前金额:' + H.fmt2(before));
     }
