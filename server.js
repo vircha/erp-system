@@ -3487,7 +3487,17 @@ const requestHandler = async (req, res) => {
     //    二维码里不能写 R2 预签名 URL（7天过期，扫不出来），所以固定指这个短链，
     //    由 refresh_apk_url.sh 持续把 update.json 指向最新版，短链永不变。
     //    以前这里落到 serveStatic 找 public/downloads/apk 这个文件→ 404，扫码必然失败。
-    else if (u.pathname === '/downloads/apk') redirectApk(res);
+    else if (u.pathname === '/downloads/apk') redirectApk(req, res, findLocalApk());
+    // 🔴🔴 2026-11-03（经理「担心移动端下载被刷流量」）：
+    //    **服务器本地实体 APK 一律不再直出**，全部 302 到 R2 预签名直链。
+    //    背景：erp.example.com 是 DNS-only 直连（不走 Cloudflare），服务器在香港
+    //    VH Global（按流量/带宽计费的 VPS），累计出网已 160GB。而实体包的 URL
+    //    是**可猜的**（HePingERP-v<版本号>-release.apk），任何人拿到就能无限拉
+    //    22.9MB/次，全从服务器出网烧钱 —— 这是唯一绕过 R2 的口子。
+    //    现在：.apk 直链 → 302 → R2（Cloudflare R2 出网免费）→ 服务器零出流量。
+    //    保留 fallback：万一 update.json 里 r2Url 缺失（R2 配置异常/续签失败），
+    //    仍回落到本地实体文件直出，保证员工永远下得到包（宁可烧流量也不能断更新）。
+    else if (/^\/downloads\/[^/]+\.apk$/i.test(u.pathname)) redirectApk(req, res, u.pathname);
     else serveStatic(req, res, u.pathname);
   } catch (e) {
     console.error(e);
@@ -3496,8 +3506,34 @@ const requestHandler = async (req, res) => {
   }
 };
 
-/** /downloads/apk → 302 到 update.json 里的最新版 R2 预签名地址 */
-function redirectApk(res) {
+/**
+ * 🔴 找出服务器本地存在的 APK 实体文件（相对 public 的路径），用作 R2 不可用时的兜底。
+ *    规则：只认 public/downloads/ 下的 .apk；若有多个，取最新修改的那个。
+ *    找不到返回 null（此时只能 503）。
+ */
+function findLocalApk() {
+  try {
+    const dir = path.join(PUBLIC_DIR, 'downloads');
+    const list = fs.readdirSync(dir).filter(f => /\.apk$/i.test(f)).map(f => {
+      try { return { f, t: fs.statSync(path.join(dir, f)).mtimeMs }; } catch (e) { return { f, t: 0 }; }
+    });
+    if (!list.length) return null;
+    list.sort((a, b) => b.t - a.t);
+    return '/downloads/' + list[0].f;
+  } catch (e) { return null; }
+}
+
+/**
+ * /downloads/apk（以及任何 /downloads/*.apk 直链）→ 302 到 update.json 里的最新版 R2 预签名地址
+ *
+ * 🔴🔴 2026-11-03：签名从 (res) 改为 (req, res, fallbackPath)。
+ *   原因：本地实体 APK 的直链是**可猜的**（HePingERP-v<版本号>-release.apk），
+ *   而 erp 站点是 DNS-only 直连、服务器按流量计费 → 任何人猜到 URL 就能无限刷
+ *   服务器出网（22.9MB/次）。所以实体包也一律 302 到 R2（出网免费），服务器零出流量。
+ *   fallbackPath：仅当 update.json 里拿不到可用的 r2Url 时，才回落到本地实体文件直出，
+ *   保证「R2 续签失败 / update.json 损坏」时员工仍能下到包（更新链路不能因为省钱而断）。
+ */
+function redirectApk(req, res, fallbackPath) {
   try {
     const j = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, 'downloads/update.json'), 'utf8'));
     // 🔴🔴 2026-10-23 根治「移动版 App 里点「用浏览器下载」下到的是旧版本」：
@@ -3523,6 +3559,11 @@ function redirectApk(res) {
     });
     return res.end('redirecting to v' + j.versionName);
   } catch (e) {
+    // 🔴 兜底：R2 地址不可用时，宁可烧服务器流量也要保证员工能下到包
+    if (fallbackPath) {
+      console.warn('[apk] R2 预签名不可用，回落本地实体文件：' + e.message);
+      return serveStatic(req, res, fallbackPath);
+    }
     res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('APK 暂不可用，请稍后重试');
   }
@@ -3539,7 +3580,7 @@ MOD.sweep(); // 启动时先跑一次：重启期间超期的记录立刻生效�
 console.log(`[moderation] 合规巡检已启动：整改窗口 ${MOD.GRACE_MINUTES} 分钟`);
 
 // HTTP 监听地址：生产建议设 127.0.0.1（仅本机/反代可达），消除公网明文直连暴露；
-// 反代(如 your-domain.cn HTTPS)在同机转发到 127.0.0.1:PORT 即可。默认 0.0.0.0 便于本地开发。
+// 反代(如 your-domain HTTPS)在同机转发到 127.0.0.1:PORT 即可。默认 0.0.0.0 便于本地开发。
 const HTTP_BIND = process.env.ERP_BIND || '0.0.0.0';
 server.listen(PORT, HTTP_BIND, () => console.log(`ERP running: http://${HTTP_BIND}:${PORT}`));
 
