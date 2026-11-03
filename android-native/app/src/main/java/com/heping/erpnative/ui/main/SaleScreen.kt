@@ -661,12 +661,21 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                         }
                         // 单品折扣：有的商品有、有的没有，逐行独立
                         // 🔴 2026-10-20 客户账号：只读展示（服务端已强制取价，见 ItemDiscountBox 注释）
+                        // 🔴🔴 2026-10-30 退货单：当时也只读 —— 服务端按历史快照 / 门店历史价强制取价，
+                        //    报文里的 discount 一律忽略，改了不生效就别给假入口。
+                        // 🔴🔴🔴 2026-11-03 经理报修「移动版退货单没法修改折扣」：
+                        //    退货单的**单品折扣改为可协商调整**（协商让利/扣损），
+                        //    服务端 returnLineEditable()：报文折扣 == 历史折扣 → 逐分沿用历史成交价；
+                        //    不同 → 按「折前价 × 新折扣」重算。
+                        //    单价仍然锁死（.clickable 里 detailIdx 仍禁止 isReturn）——
+                        //    弹窗里能改单价，那是「改价」，不属于这次报修范围。
+                        //    🔴 客户角色仍然只读：客户压根进不来退货接口（服务端显式 403）。
                         ItemDiscountBox(
                             key = line.product.id,
                             value = line.discount,
                             onChange = { d -> vm.setItemDiscount(idx, d) },
                             readBack = { vm.cart.getOrNull(idx)?.discount },
-                            readOnly = SessionStore.isCustomer || isReturn
+                            readOnly = SessionStore.isCustomer
                         )
                         IconButton(
                             onClick = {
@@ -746,12 +755,18 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
         // 🔴 2026-10-20 客户账号：明说折扣/单价是只读的，省得客户去点灰框。
         //    数量照常可改（加减按钮和数字框都在）。
         // 🔴🔴 2026-10-30 退货单：同样只读 —— 服务端对所有退货路径强制按历史金额+历史折扣取价。
-        if (SessionStore.isCustomer || isReturn) {
+        // 🔴🔴🔴 2026-11-03 退货单折扣放开后，文案要跟着改：
+        //    单价仍锁历史（不能改），但单品折扣可以协商调整。
+        if (SessionStore.isCustomer) {
             Text(
-                if (SessionStore.isCustomer)
-                    "单价与折扣按本店历史价带出，不能修改；数量可改"
-                else
-                    "退货单价与折扣按历史成交价带出，不能修改；数量可改",
+                "单价与折扣按本店历史价带出，不能修改；数量可改",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+            )
+        } else if (isReturn) {
+            Text(
+                "退货单价按历史成交价带出，不能修改；单品折扣可协商调整（默认按历史折扣）；数量可改",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)

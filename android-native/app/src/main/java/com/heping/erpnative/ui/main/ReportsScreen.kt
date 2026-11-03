@@ -169,7 +169,12 @@ private fun SalesSection(vm: AnalyticsViewModel) {
             Text("${d.from} ~ ${d.to}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                KpiCard2("销售总额", fmtM(d.grossSales), Modifier.weight(1f))
+                // 🔴 2026-11-03 修「销售总额虚高」：服务端原来 JOIN order_items 后 SUM(o.payable)
+                //   → 一张 N 行单的订单总额被累加 N 次（实测放大 7.85~16.5×）。
+                //   现在服务端已改成订单级聚合。移动端这里读 **d.sales（净额，含退货红冲）**，
+                //   与网页端「销售总额」完全一致；下面「退货金额」卡片单列退货额，
+                //   两者相加/相减能对上账（毛额 1588.68 − 退货 18.31 = 净额 1570.37）。
+                KpiCard2("销售总额", fmtM(d.sales), Modifier.weight(1f))
                 KpiCard2("利润", fmtM(d.profit), Modifier.weight(1f))
             }
             Spacer(Modifier.height(8.dp))
@@ -179,7 +184,10 @@ private fun SalesSection(vm: AnalyticsViewModel) {
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                KpiCard2("退货金额", fmtM(d.returns), Modifier.weight(1f), neg = d.returns > 0)
+                // 🔴 2026-11-03：服务端 returns 返回的是**负数**（退货红冲），
+                //   所以判断要按「非零」而不是「> 0」，否则退货发生时反而不标红。
+                //   显示取绝对值（退货金额本来就是正的量级），卡片配色仍标红提示。
+                KpiCard2("退货金额", fmtM(kotlin.math.abs(d.returns)), Modifier.weight(1f), neg = kotlin.math.abs(d.returns) > 0.005)
                 KpiCard2("退货率", pctS(d.returnRate), Modifier.weight(1f), neg = d.returnRate > 0.05)
             }
             if (d.insights.isNotEmpty()) {

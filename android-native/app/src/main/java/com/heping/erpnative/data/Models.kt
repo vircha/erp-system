@@ -181,7 +181,15 @@ data class CreateOrderItem(
     // ⚠️ 一旦带上 discount，服务端会把 price 当作「折前单价」，
     //    成交单价 = price × discount。不带 discount 则 price 就是成交价（兼容旧逻辑）。
     val price: Double? = null,
-    val discount: Double? = null
+    val discount: Double? = null,
+    // 🔴 2026-11-03「移动版退货单没法修改折扣」：
+    //   这一行标记**本行折扣被用户实际改动过**（没动就 false）。
+    //   服务端退货取价只看这个标记，不看折扣数值 ——
+    //   因为两端「折前×折扣≈成交价」的容差不同（网页 0.01 / 移动 0.05 / 服务端 0.02），
+    //   靠数值猜「改没改」必然误判（老单 orig_price 缺失时会把折扣当 1 → 金额被重算）。
+    //   · false/缺失 → 成交价 = 历史成交价，一分不差（v5.7.8 语义不变）
+    //   · true       → 成交价 = 服务端历史折前价 × 新折扣（可协商让利/扣损）
+    @SerializedName("disc_changed") val discChanged: Boolean? = null
 )
 
 data class CreateOrderRequest(

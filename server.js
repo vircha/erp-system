@@ -501,6 +501,9 @@ function resolveReturnPrice(bookId, customerId, productId, prodPrice, snaps) {
     return {
       orig_price: base,
       discount: selfConsistent ? d : 1,
+      // 🔴 cap_price = **历史成交价** = 退货金额的天花板（退的钱不能比当初卖出去的多）。
+      //   快照来源时 price 就是当时的成交价；门店历史价来源时 price = 折前 × 历史折扣。
+      cap_price: isFinite(p) ? p : 0,
       price: isFinite(p) ? p : 0,
       source: 'snapshot',
     };
@@ -514,12 +517,14 @@ function resolveReturnPrice(bookId, customerId, productId, prodPrice, snaps) {
       const dRaw = Number(cp.discount);
       const d = (isFinite(dRaw) && dRaw > 0) ? Math.min(1, Math.max(0.1, dRaw)) : 1;
       if (isFinite(op) && op > 0) {
-        return { orig_price: op, discount: d, price: lineCalc(op, 1, d).price, source: 'store' };
+        const hp = lineCalc(op, 1, d).price;
+        return { orig_price: op, discount: d,
+                 price: hp, cap_price: hp, source: 'store' };
       }
     }
   }
   const pp = Number(prodPrice) || 0;
-  return { orig_price: pp, discount: 1, price: pp, source: 'base' };
+  return { orig_price: pp, discount: 1, price: pp, cap_price: pp, source: 'base' };
 }
 
 // 用 resolveReturnPrice 的结果组装一行明细（成交单价直接用历史值，不重算）
@@ -530,6 +535,90 @@ function returnLineCalc(rp, qty) {
     price,
     orig_price: Number(rp.orig_price) || 0,
     discount: Number(rp.discount) || 1,
+    subtotal: +(price * q).toFixed(2),
+  };
+}
+
+// ---------- 退货行「可改折扣」的最终取价（2026-11-03 经理报修「移动版退货单没法修改折扣」）----------
+// 🔴 背景：v5.7.8 按经理要求「客户退货金额+折扣也要按照历史金额+折扣」，当时把退货的
+//   折前价与单品折扣**全部锁死只读**（报文 price/discount 一律忽略）→ 经理改不了折扣。
+//   本轮要求：退货单**要能改折扣**（协商让利/扣损）。
+//
+// 🔴🔴🔴 本轮定下的三条铁律（与 v5.7.8 的关系见下）：
+//   ① **折前价恒取服务端历史值**（hist.orig_price），**报文里的 price 一律忽略**。
+//      这是防篡改底线：否则一条报文 `price=0.01, discount=0.5` 就能把 80 元的退货
+//      变成 0.4 元，v5.7.8 立的「退货金额按历史」这道防线整个破掉。
+//      → 放开的**只有折扣这一个维度**。
+//
+//   ② **折扣可改，且「没改」= 逐分沿用历史成交价**。
+//      判定**不能靠「报文的折扣数值等于历史折扣」**——两端容差不同
+//      （网页 0.01 / 移动 0.05 / 服务端 0.02），必然出现「客户端还原的折扣 == 快照原值，
+//      但服务端自洽校验不通过 → 服务端把折扣当 1」→ 误判成「改过」→ 金额被重算。
+//      → 改用**显式标记**：客户端在折扣框被**实际改动过**时才带 `disc_changed: true`。
+//        服务端只看这个标记，不看数值。
+//        · 标记缺失/false → **成交价 = 历史成交价，一分不差**（v5.7.8 语义不变）
+//        · 标记 true     → 按「历史折前价 × 新折扣」重算
+//      这样「折扣没动」和「折扣改了」由客户端如实上报，不靠猜。
+//      🔴 老客户端（不传该字段）→ 一律按「没改」处理 → 与 v5.7.8 完全一致，绝无回归。
+//
+//   ③ **金额上限 = 历史成交价**（hist.cap_price）：退货退的钱不能超过当初卖出去的钱。
+//      折扣往上调（让客户多拿钱）→ 压回历史成交价，并把 discount 回写成自洽值
+//      （保证 order_items 里 orig_price × discount == price，下一单取价不错位）。
+//      折扣往下调（协商让利 / 扣损）→ 正常生效，这正是本次要的能力。
+//
+// 🔴 为什么可以采信报文的**折扣**（定价权只在员工手里）：
+//   客户角色**根本进不来**任何退货接口 ——
+//     · POST /api/orders type='return' → 显式 403「客户账号不能提交退货单」；
+//     · PUT /api/orders/:id           → need('order.edit')，客户 perms 里没有；
+//     · POST /api/orders/:id/return   → need('order.return')，客户没有；
+//     · POST /api/orders/:id/return-items → need('order.return')，客户没有。
+//   所以「退货金额按历史」这条**不会被客户绕过**，员工改价/改折扣是正常业务动作
+//   （销售单本来就由员工定价）。
+function returnLineEditable(hist, qty, reqDiscount, discChanged) {
+  const q = Number(qty) || 0;
+  const histDisc = Number(hist.discount) || 1;
+  const histPrice = Number(hist.price) || 0;
+  const histBase = Number(hist.orig_price) || 0;
+  // 沿用历史成交价（折扣没改 / 老客户端 / 折扣非法 / 老数据没有折前价）
+  const keepHistory = () => ({
+    price: histPrice,
+    orig_price: histBase,
+    discount: histDisc,
+    subtotal: +(histPrice * q).toFixed(2),
+  });
+  // ① 折扣没被改过 → **原样沿用历史成交价**，绝不重算
+  //    （保证与 v5.7.8 逐分一致，也避免二次打折）
+  if (!discChanged) return keepHistory();
+  // ② 折扣被改过 → 用报文折扣；缺/非法 → 回落到历史折扣（等于不生效）
+  const rd = Number(reqDiscount);
+  if (!isFinite(rd) || rd <= 0) return keepHistory();
+  const reqDisc = Math.min(1, Math.max(0.1, rd));
+  // 折前价恒取**服务端历史值**（不信报文 price，防篡改）；
+  // 拿不到折前价（老数据没有 orig_price 列）→ 无法重算 → 沿用历史，安全兜底。
+  if (!(histBase > 0)) return keepHistory();
+  // 🔴 折扣**上限 = 历史折扣**：不能调得比历史更高。
+  //   历史折前价 80、历史折扣 0.9（成交 72）→ 折扣只能往下调（0.8 → 退 64 = 协商扣损/让利）。
+  //   往上调到 1.0 → 会被压回 0.9，退的还是 72（= 当初实收），
+  //   不会出现「退的比卖出去的多」。客户端也按同一条上限夹紧 → 两端口径一致。
+  const ceiling = Math.max(0.1, Math.min(1, histDisc));
+  const effDisc = Math.min(reqDisc, ceiling);
+  let price = +(histBase * effDisc).toFixed(2);
+  // ③ 兜底上限 = 历史成交价（退的钱不能比当初卖出去的多）
+  const capPrice = Number(hist.cap_price) || 0;
+  if (capPrice > 0 && price > capPrice) {
+    price = capPrice;
+    const fixed = +(capPrice / histBase).toFixed(4);
+    return {
+      price,
+      orig_price: +histBase.toFixed(2),
+      discount: (fixed > 0) ? fixed : effDisc,
+      subtotal: +(price * q).toFixed(2),
+    };
+  }
+  return {
+    price,
+    orig_price: +histBase.toFixed(2),
+    discount: effDisc,
     subtotal: +(price * q).toFixed(2),
   };
 }
@@ -1784,8 +1873,12 @@ async function handleApi(req, res, u) {
         //   业务员代客开退货单时，前端送来的就是该门店的历史成交价（折前）+ 历史单品折扣，
         //   这里服务端再强制一次：① 防篡改 ② 老客户端不带 discount 时不丢折扣。
         //   口径与前端 priceFor()/itemDiscFor() 完全一致（都是 customer_prices：price=折前）。
+        //
+        // 🔴 2026-11-03 经理报修「移动版退货单没法修改折扣」：
+        //   改为 **折扣可协商调整**，但默认仍按历史（报文折扣 == 历史折扣 → 一分不差）。
+        //   折前单价仍锁历史（客户端弹窗不开放改单价），只有折扣能改。
         const rp = resolveReturnPrice(bookId, b.customer_id, prod.id, Number(prod.price) || 0, []);
-        c = returnLineCalc(rp, qty);
+        c = returnLineEditable(rp, qty, it.discount, it.disc_changed === true);
       } else if (_forceStorePrice) {
         // 客户角色：报文里的 it.price / it.discount **一律忽略**
         const cp = db.prepare('SELECT price, discount FROM customer_prices WHERE book_id=? AND customer_id=? AND product_id=?')
@@ -2088,11 +2181,12 @@ async function handleApi(req, res, u) {
       const fallbackPrice = prevBase > 0 ? prevBase : (prod ? Number(prod.price) || 0 : 0);
       let c;
       if (isReturnEdit) {
-        // 🔴 退货单编辑：金额/折扣按历史快照（报文 price/discount 忽略）
+        // 🔴 退货单编辑：金额/折扣默认按历史快照（报文 price/discount 忽略）
+        // 🔴 2026-11-03：折扣改为**可协商调整**（报文折扣 == 历史折扣 → 原样沿用历史成交价）
         const rp = resolveReturnPrice(bookId, b.customer_id, pid,
           prod ? (Number(prod.price) || 0) : 0,
           [retOrigByPid.get(pid) || null, prev]);
-        c = returnLineCalc(rp, qty);
+        c = returnLineEditable(rp, qty, it.discount, it.disc_changed === true);
       } else if (it.discount != null) {
         c = lineCalc(it.price !== undefined ? it.price : fallbackPrice, qty, it.discount);
       } else {
@@ -2689,13 +2783,33 @@ async function handleApi(req, res, u) {
     if (from) { w.push('date(COALESCE(o.order_date,o.created_at))>=?'); a.push(from); }
     if (to) { w.push('date(COALESCE(o.order_date,o.created_at))<=?'); a.push(to); }
     const wh = w.length ? ' AND ' + w.join(' AND ') : '';
-    const rows = db.prepare(`
-      SELECT o.customer_id, o.customer_name,
-             COUNT(DISTINCT o.id) orders, SUM(COALESCE(o.payable,o.total)) sales,
-             SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty) profit
+    // 🔴🔴🔴 2026-11-03 修 JOIN 扇出：原来 `JOIN order_items` 后 `SUM(o.payable)`
+    //   → 一张 N 行单的订单总额被累加 N 次，门店销售额虚高一个数量级（实测 7.85~16.5×）。
+    //   ✅ 正解：**拆成两条查询** ——
+    //     ① 订单级：每单只算一次 → 销售额 / 单数（无扇出）
+    //     ② 明细级：按行算 → 利润（每条明细在 JOIN 后恰好出现一次，天然无扇出）
+    //     再按 customer_id 合并。
+    const ordLvl = db.prepare(`
+      SELECT customer_id,
+             COUNT(*) as orders,
+             COALESCE(SUM(COALESCE(payable,total)),0) as sales
+      FROM orders o WHERE o.book_id=? ${wh}
+      GROUP BY customer_id`).all(...a);
+    const itemLvl = db.prepare(`
+      SELECT o.customer_id,
+             COALESCE(SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty),0) as profit
       FROM orders o JOIN order_items oi ON oi.order_id=o.id
       WHERE o.book_id=? ${wh}
-      GROUP BY o.customer_id ORDER BY sales DESC LIMIT 200`).all(...a);
+      GROUP BY o.customer_id`).all(...a);
+    const nameOf = new Map(db.prepare('SELECT id, name FROM customers WHERE book_id=?').all(bookId).map(c => [c.id, c.name]));
+    const profitOf = new Map(itemLvl.map(x => [x.customer_id, x.profit]));
+    const rows = ordLvl.map(r => ({
+      customer_id: r.customer_id,
+      customer_name: nameOf.get(r.customer_id) || ('客户' + r.customer_id),
+      orders: r.orders,
+      sales: r.sales,
+      profit: profitOf.get(r.customer_id) || 0,
+    })).sort((a, b) => b.sales - a.sales).slice(0, 200);
     return sendJSON(res, 200, rows.map(r => ({ ...r, sales: +(r.sales || 0).toFixed(2), profit: +(r.profit || 0).toFixed(2) })));
   }
 
@@ -2721,15 +2835,28 @@ async function handleApi(req, res, u) {
 
   if (p === '/api/analysis/monthly' && method === 'GET') {
     if (!need('analysis.view')) return;
-    const rows = db.prepare(`
+    // 🔴🔴🔴 2026-11-03 修 JOIN 扇出：原来 `JOIN order_items` 后 `SUM(o.payable)`
+    //   → 每单被展开成 N 行、订单总额累加 N 次，月度销售额虚高一个数量级。
+    //   ✅ 正解：拆两条 —— ① 订单级（销售额/单数，每单一次）② 明细级（利润/数量，按行算）。
+    const ordLvl = db.prepare(`
+      SELECT strftime('%Y-%m', COALESCE(order_date, created_at)) as month,
+             COUNT(*) as orders,
+             COALESCE(SUM(COALESCE(payable,total)),0) as sales
+      FROM orders WHERE book_id = ?
+      GROUP BY month`).all(bookId);
+    const itemLvl = db.prepare(`
       SELECT strftime('%Y-%m', COALESCE(o.order_date, o.created_at)) as month,
-             SUM(COALESCE(o.payable, o.total)) as sales,
-             SUM(oi.qty) as qty,
-             SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty) as profit,
-             COUNT(DISTINCT o.id) as orders
+             COALESCE(SUM(oi.qty),0) as qty,
+             COALESCE(SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty),0) as profit
       FROM orders o JOIN order_items oi ON oi.order_id = o.id
       WHERE o.book_id = ?
-      GROUP BY month ORDER BY month DESC LIMIT 24`).all(bookId);
+      GROUP BY month`).all(bookId);
+    const itOf = new Map(itemLvl.map(x => [x.month, x]));
+    const rows = ordLvl.map(r => ({
+      month: r.month, orders: r.orders, sales: r.sales,
+      qty: (itOf.get(r.month) || {}).qty || 0,
+      profit: (itOf.get(r.month) || {}).profit || 0,
+    })).sort((a, b) => (a.month < b.month ? 1 : -1)).slice(0, 24);
     return sendJSON(res, 200, rows);
   }
 
@@ -2747,14 +2874,32 @@ async function handleApi(req, res, u) {
     else { from = to = fmt(t); }
     if (!from || !to) return sendJSON(res, 400, { error: '自定义区间需提供 from/to' });
     const dExpr = "date(COALESCE(o.order_date, o.created_at))";
+    // 🔴🔴🔴 2026-11-03 经理报修「销售总额不对，我没出这么多货」——**真根因是 JOIN 扇出**。
+    //   原写法：`FROM orders o JOIN order_items oi ...` 然后 `SUM(o.payable)`。
+    //   JOIN 后一张 N 行的单会被展开成 N 行 → 订单级字段 payable 被累加 **N 次**。
+    //   实测（生产库 book_id=1）：
+    //     2026-11-02  真实净额 1570.37  →  报表显示 12329.60（放大 7.85×）
+    //     2026-10-31  真实净额 2655.33  →  报表显示 43819.44（放大 16.5×）
+    //   原因：单均 7~9 行商品 → 金额被放大一个数量级。
+    //   ✅ 正解：**订单级字段一律走 orders 表单独聚合，绝不与 order_items JOIN 后再 SUM**。
+    //      销售总额 = Σ订单 payable（退货单 payable 为负，自动红冲）；
+    //      退货额/退货单数/销售额（不含退货）都从同一份订单级聚合里取，口径自洽。
+    const ordAgg = db.prepare(`
+      SELECT COUNT(*) as orders,
+             COALESCE(SUM(COALESCE(payable,total)),0) as net_sales,
+             COALESCE(SUM(CASE WHEN status<>'returned' THEN COALESCE(payable,total) ELSE 0 END),0) as gross_sales,
+             COALESCE(SUM(CASE WHEN status='returned'  THEN COALESCE(payable,total) ELSE 0 END),0) as return_amt,
+             SUM(CASE WHEN status='returned' THEN 1 ELSE 0 END) as return_cnt
+      FROM orders o
+      WHERE o.book_id=? AND ${dExpr} BETWEEN ? AND ?`).get(bookId, from, to);
+    // 明细级聚合（利润/数量）：**这里 JOIN 是对的** ——
+    //   profit 与 qty 都是「按行算」的量，每条明细在 JOIN 后恰好出现一次，天然无扇出。
     const tot = db.prepare(`
-      SELECT COALESCE(SUM(COALESCE(o.payable,o.total)),0) as sales,
-             COALESCE(SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty),0) as profit,
-             COALESCE(SUM(oi.qty),0) as qty,
-             COUNT(DISTINCT o.id) as orders
+      SELECT COALESCE(SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty),0) as profit,
+             COALESCE(SUM(oi.qty),0) as qty
       FROM orders o JOIN order_items oi ON oi.order_id=o.id
       WHERE o.book_id=? AND ${dExpr} BETWEEN ? AND ?`).get(bookId, from, to);
-    // 🔴🔴 GROUP BY 只按 product_id（原来还带 oi.product_name → 商品改名后被拆组、销量割裂）
+    // 🔴🔴 2026-11-03 经理报修「销售总额不对，我没出这么多货」——**真根因是 JOIN 扇出**。
     const products = db.prepare(`
       SELECT oi.product_id as pid,
              COALESCE(SUM(oi.qty),0) as qty,
@@ -2776,9 +2921,43 @@ async function handleApi(req, res, u) {
         pr.cost = Number(s.cost) || 0;
       }
     }
-    const sales = tot.sales || 0, profit = tot.profit || 0;
+    const sales = +(ordAgg.net_sales || 0).toFixed(2);
+    const grossSales = +(ordAgg.gross_sales || 0).toFixed(2);
+    const returnsAmt = +(ordAgg.return_amt || 0).toFixed(2);
+    const returnCount = ordAgg.return_cnt || 0;
+    const profit = +(tot.profit || 0).toFixed(2);
     products.forEach(pr => { pr.qty = pr.qty || 0; pr.sales = pr.sales || 0; pr.profit = pr.profit || 0; pr.margin = (pr.sales !== 0 ? pr.profit / pr.sales : 0); });
-    return sendJSON(res, 200, { range, from, to, sales, profit, margin: (sales !== 0 ? profit / sales : 0), orders: tot.orders || 0, qty: tot.qty || 0, products });
+    // 🔴 移动端 AnalyticsResp 期望的字段（grossSales / returns / returnRate / returnCount / insights）
+    //   服务端原来**一个都没返回** → Gson 全部取默认值 → 移动端「销售总额」恒为 0、
+    //   「退货金额」「退货率」恒为 0、「经营建议」永远空白。这里补齐。
+    const insights = [];
+    const returnRate = (grossSales > 0.005 ? Math.abs(returnsAmt) / grossSales : 0);
+    if (returnRate > 0.05) insights.push({ type: 'warn', text: `退货率 ${(returnRate * 100).toFixed(1)}% 偏高（${returnCount} 单 / ¥${Math.abs(returnsAmt).toFixed(2)}），建议核查退货原因` });
+    else if (returnCount > 0) insights.push({ type: 'info', text: `退货 ${returnCount} 单，退货率 ${(returnRate * 100).toFixed(1)}%（¥${Math.abs(returnsAmt).toFixed(2)} 已从销售额抵减）` });
+    if (sales > 0.005) {
+      const m = profit / sales;
+      if (m < 0.05) insights.push({ type: 'warn', text: `利润率仅 ${(m * 100).toFixed(1)}%，偏低，建议复核进价与折扣` });
+      else if (m >= 0.2) insights.push({ type: 'good', text: `利润率 ${(m * 100).toFixed(1)}%，盈利情况良好` });
+    }
+    if (products.length) {
+      const top = products[0];
+      insights.push({ type: 'info', text: `销量最高：${top.name || '—'}（${top.qty} 件 / ¥${(top.sales || 0).toFixed(2)}）` });
+    }
+    if (!insights.length) insights.push({ type: 'info', text: '该区间暂无销售数据' });
+    return sendJSON(res, 200, {
+      range, from, to,
+      sales,                       // 净额（含退货红冲）= 网页端「销售总额」
+      grossSales,                  // 不含退货的销售额
+      returns: returnsAmt,         // 退货金额（负数=红冲）
+      returnRate,                  // 退货率 = |退货额| / 不含退货销售额
+      returnCount,
+      profit,
+      margin: (sales !== 0 ? profit / sales : 0),
+      orders: ordAgg.orders || 0,
+      qty: tot.qty || 0,
+      products,
+      insights,
+    });
   }
 
   // ---------- 当天出货汇总（门店×产品 透视；仅含出货/退货的门店与产品，含成本价） ----------

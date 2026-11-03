@@ -43,8 +43,15 @@ android {
         //   （汉字本该占 4 列）→ 字形压扁 + 相邻字重叠。
         //   修复：① 标签改回正常宽度（与实打印 BtPrinter.kt / renderEsc 一致）；
         //         ② textWide 前进量改为「字符实际宽度 × 2」。
-        versionCode 68
-        versionName "5.7.10"
+        // 🔴 v5.7.11：修「退货单没法修改折扣」（经理报修「erp移动版，退货单没法修改折扣 修复」）。
+        //   ① 退货单**单品折扣放开**为可协商调整（协商让利/扣损），**单价仍锁历史成交价**；
+        //   ② 客户端新增 `disc_changed` 显式标记，服务端只看标记不看折扣数值
+        //      （两端容差不同，靠数值猜「改没改」必然误判）；
+        //   ③ 服务端折前价恒取历史值（防篡改），折扣上限 = 历史折扣（不能退得比当初实收多）；
+        //   ④ 老客户端不传该字段 → 逐分沿用历史成交价，与 v5.7.8 完全一致（零回归）。
+        //   ⑤ 同版修「销售总额虚高」：/api/analytics 等三处 JOIN 扇出导致金额被累加 N 次。
+        versionCode 69
+        versionName "5.7.11"
         vectorDrawables { useSupportLibrary true }
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——

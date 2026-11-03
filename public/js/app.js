@@ -1407,7 +1407,11 @@ if (d.trust_full) {
           <div class="card" style="flex:1;min-width:150px;margin:0"><div class="muted" style="font-size:12px">利润</div><div id="an-profit" style="font-size:22px;font-weight:800">-</div></div>
           <div class="card" style="flex:1;min-width:150px;margin:0"><div class="muted" style="font-size:12px">利润率</div><div id="an-margin" style="font-size:22px;font-weight:800">-</div></div>
           <div class="card" style="flex:1;min-width:150px;margin:0"><div class="muted" style="font-size:12px">订单数 / 数量</div><div id="an-orders" style="font-size:18px;font-weight:700">-</div></div>
+          <!-- 🔴 2026-11-03：补「退货金额 / 退货率」，让销售总额能对账
+               （毛额 − 退货额 = 净额），退货不再是一个看不见的黑洞。 -->
+          <div class="card" style="flex:1;min-width:150px;margin:0"><div class="muted" style="font-size:12px">退货金额 / 退货率</div><div id="an-returns" style="font-size:18px;font-weight:700">-</div></div>
         </div>
+        <div id="an-insights" style="margin-top:10px"></div>
         <div id="an-body" style="margin-top:12px"><div class="muted">加载中…</div></div>
       </div>
       <div class="card">
@@ -1576,6 +1580,22 @@ if (d.trust_full) {
       $('#an-profit').textContent = moneyOf(d.profit);
       $('#an-margin').textContent = pctOf(d.margin);
       $('#an-orders').textContent = d.orders + ' 单 / ' + num2(d.qty);
+      // 🔴 2026-11-03：退货金额/退货率（服务端新返回的 returns / returnRate）
+      const rt = $('#an-returns');
+      if (rt) {
+        const rAbs = Math.abs(Number(d.returns) || 0);
+        rt.textContent = moneyOf(rAbs) + ' / ' + pctOf(d.returnRate || 0);
+        rt.style.color = rAbs > 0.005 ? 'var(--danger)' : '';
+      }
+      // 经营建议（服务端 insights）
+      const ins = $('#an-insights');
+      if (ins) {
+        const list = d.insights || [];
+        ins.innerHTML = list.length
+          ? '<div class="muted" style="font-size:12px;margin-bottom:4px">经营建议</div>'
+            + list.map(i => `<div style="font-size:12px;padding:2px 0">• ${esc(i.text || '')}</div>`).join('')
+          : '';
+      }
       const list = d.products || [];
       $('#an-body').innerHTML = list.length
         ? '<table class="tbl"><thead><tr><th>产品</th><th style="text-align:right">数量</th><th style="text-align:right">销售额</th><th style="text-align:right">利润</th><th style="text-align:right">利润率</th></tr></thead><tbody>'
@@ -1721,7 +1741,9 @@ if (d.trust_full) {
   const allSel = () => saleState.items.length > 0 && saleState.items.every(it => it.sel);
   function applyDisc(idxs, v, tip) {
     if (!idxs.length) { toast('请先勾选要打折的行（或勾「全选所有行」）'); return; }
-    idxs.forEach(i => { saleState.items[i].discount = v; saleState.items[i].disc_from = 'manual'; });
+    // 🔴 2026-11-03：批量设折扣 = 也是「用户改过折扣」→ 同样置 disc_changed = true。
+    //   （服务端只在**退货路径**看这个标记，销售单路径忽略 → 不影响现有开单逻辑。）
+    idxs.forEach(i => { saleState.items[i].discount = v; saleState.items[i].disc_from = 'manual'; saleState.items[i].disc_changed = true; });
     renderSaleItems();
     if (tip) toast(tip.replace('%n', idxs.length).replace('%v', v));
   }
@@ -2076,7 +2098,13 @@ if (d.trust_full) {
     else saleState.items.push({ product_id: p.id, name: p.name, spec: p.spec, unit: p.unit,
                                 price: r.price, from: r.from, qty: 1, sel: false,
                                 pack_size: Number(p.pack_size) || 0,
-                                discount: itemDiscFor(pid), disc_from: custItemDisc[pid] != null ? 'store' : 'base' });
+                                discount: itemDiscFor(pid), disc_from: custItemDisc[pid] != null ? 'store' : 'base',
+                                // 🔴 2026-11-03：带出来的折扣是**门店历史折扣**，用户没改过 → false
+                                disc_changed: false,
+                                // 🔴 折扣上限 = 带出来的这个历史折扣（退货模式才生效）。
+                                //   服务端 returnLineEditable() 的 ceiling 就是 hist.discount ——
+                                //   折扣只能往下调（协商让利/扣损）；往上调会退得比当初实收还多。
+                                disc_ceil: itemDiscFor(pid) });
     renderSaleItems();
   }
 
@@ -2109,7 +2137,13 @@ if (d.trust_full) {
       //   报文里的 price/discount 一律忽略 → 退货模式下这两个框必须只读，
       //   否则用户改了没反应却不知道原因。
       //   整单折扣（sale-discount）仍可手填 —— 那是「协商让利」的口子，与行级历史价不冲突。
-      const _roPrice = (ME.role === 'customer') || isReturnMode();
+      //
+      // 🔴🔴 2026-11-03 经理报修「移动版退货单没法修改折扣」：
+      //   退货单**折扣改为可协商调整**（协商让利/扣损），**单价仍锁历史**。
+      //   服务端 returnLineEditable()：报文折扣 == 历史折扣 → 逐分沿用历史成交价；
+      //   不同 → 按「折前价 × 新折扣」重算。所以这里把「单价只读」和「折扣只读」拆成两个标志。
+      const _roPrice = (ME.role === 'customer') || isReturnMode();   // 单价：客户/退货 → 只读
+      const _roDisc = (ME.role === 'customer');                       // 折扣：只有客户只读
       box.innerHTML = saleState.items.map((it, i) => {
         const d = discOf(it);
         const pay = linePrice(it);
@@ -2130,14 +2164,18 @@ if (d.trust_full) {
             <div class="sub">${esc(it.spec || '')} · ${esc(it.unit || '')}${it.from === 'store' ? ' · <span style="color:var(--primary)">上次价</span>' : ''}${thereAreDisc ? ` · <span style="color:#f5a524">${it.disc_from === 'store' ? '上次折扣' : '已打折'}</span>` : ''}${packTxt}</div>
           </div>
           <div class="fields">
-            ${_roPrice
+            ${_roDisc
               // 🔴 2026-10-19 经理：「客户不能修改折扣及金额 但是可以显示」。
               //   只读 input（而不是删掉）：经理明确要求「可以显示」，客户要能看见自己付多少。
               //   🔴 这只是交互层 —— 服务端已对客户强制按 customer_prices 取价（server.js
               //      _forceStorePrice），改报文也改不动。这里加 readonly 只是不让用户白点。
-              // 🔴🔴 2026-10-30 退货模式同理：服务端已强制按历史价取价（resolveReturnPrice）。
-              ? `<label class="fd is-ro"><span>单价</span><input type="number" value="${it.price}" readonly title="${ME.role === 'customer' ? '单价按本店历史价，不能修改' : '退货单价按历史成交价，不能修改'}"/></label>
-                 <label class="fd is-ro"><span>折扣</span><input type="number" value="${d}" readonly title="${ME.role === 'customer' ? '折扣由商家定，不能修改' : '退货折扣按历史折扣，不能修改'}"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`
+              // 🔴🔴 2026-10-30 客户退货同理：服务端对客户提交退货单显式 403，客户端进不来。
+              ? `<label class="fd is-ro"><span>单价</span><input type="number" value="${it.price}" readonly title="单价按本店历史价，不能修改"/></label>
+                 <label class="fd is-ro"><span>折扣</span><input type="number" value="${d}" readonly title="折扣由商家定，不能修改"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`
+              // 🔴 退货模式（员工）：单价只读（锁历史成交价）+ 折扣可改（协商让利/扣损）
+              : _roPrice
+              ? `<label class="fd is-ro"><span>单价</span><input type="number" value="${it.price}" readonly title="退货单价按历史成交价，不能修改"/></label>
+                 <label class="fd"><span>折扣</span><input type="number" min="0.1" max="1" step="0.01" value="${d}" data-di="${i}" title="默认按历史折扣带出，可协商调整"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`
               : `<label class="fd"><span>单价</span><input type="number" min="0" step="0.01" value="${it.price}" data-pi="${i}"/></label>
                  <label class="fd"><span>折扣</span><input type="number" min="0.1" max="1" step="0.01" value="${d}" data-di="${i}"/>${thereAreDisc ? `<em class="save">省 ¥${lineSave.toFixed(2)}</em>` : ''}</label>`}
             <label class="fd"><span>数量</span><input type="number" min="1" step="1" value="${it.qty}" data-i="${i}"/></label>
@@ -2155,10 +2193,27 @@ if (d.trust_full) {
       box.querySelectorAll('input[data-i]').forEach(inp => inp.onchange = e => { const i = +e.target.dataset.i; let v = parseFloat(e.target.value); if (!(v > 0)) v = 1; saleState.items[i].qty = v; e.target.value = v; renderSaleItems(); });
       box.querySelectorAll('input[data-pi]').forEach(inp => inp.onchange = e => { const i = +e.target.dataset.pi; let v = parseFloat(e.target.value); if (!(v >= 0)) v = 0; saleState.items[i].price = v; saleState.items[i].from = 'manual'; e.target.value = v; updateTotal(); });
       // 单品折扣：改完统一刷新（要同步「小计」和「上次折扣」标记）
+      // 🔴🔴 2026-11-03 经理报修「移动版退货单没法修改折扣」（网页端同步放开）：
+      //   用户在折扣框里**实际改动过** → 置 disc_changed = true。
+      //   服务端退货取价**只看这个标记**，不看折扣数值 ——
+      //   因为两端「折前×折扣≈成交价」的容差不同（网页 0.01 / 移动 0.05 / 服务端 0.02），
+      //   靠数值猜「改没改」必然误判（老单 orig_price 缺失时服务端把折扣当 1 → 金额被重算，
+      //   偏离「退货金额按历史」这条底线）。
+      //   · false/缺失 → 成交价 = 历史成交价，一分不差（v5.7.8 语义不变）
+      //   · true      → 成交价 = 服务端历史折前价 × 新折扣（可协商让利/扣损）
       box.querySelectorAll('input[data-di]').forEach(inp => inp.onchange = e => {
         const i = +e.target.dataset.di; let v = parseFloat(e.target.value);
         if (!isFinite(v) || v <= 0) v = 1; v = Math.min(1, Math.max(0.1, v));
+        // 🔴 2026-11-03：退货模式下折扣**上限 = 历史折扣**（与服务端 ceiling 同口径）。
+        //   往上调（想让客户多拿钱）会被服务端压回历史成交价；这里提前夹紧，
+        //   免得界面显示 1.0、实际却按 0.9 退 —— 账目对不上会以为系统算错。
+        //   往下调（协商让利 / 扣损）不受限，这正是本次要的能力。
+        if (isReturnMode()) {
+          const ceil = Number(saleState.items[i].disc_ceil);
+          if (isFinite(ceil) && ceil > 0 && v > ceil) v = ceil;
+        }
         saleState.items[i].discount = v; saleState.items[i].disc_from = 'manual';
+        saleState.items[i].disc_changed = true;
         renderSaleItems();
       });
       box.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { saleState.items.splice(+b.dataset.del, 1); renderSaleItems(); });
@@ -2220,7 +2275,10 @@ if (d.trust_full) {
   function salePayload() {
     return saleState.items.map(it => ({
       product_id: it.product_id, qty: it.qty,
-      price: Number(it.price) || 0, discount: discOf(it)
+      price: Number(it.price) || 0, discount: discOf(it),
+      // 🔴 2026-11-03：上报「这行折扣被用户改过没」。
+      //   服务端**只在退货路径**看这个标记，销售单路径忽略 → 不影响现有开单。
+      disc_changed: !!it.disc_changed
     }));
   }
 
@@ -2830,7 +2888,12 @@ if (d.trust_full) {
         price: base, from: 'store',
         qty: Math.abs(Number(it.qty) || 0),        // 🔴 退货单 qty 是负数 → 复制时取绝对值
         pack_size: Number(pr && pr.pack_size) || 0,
-        discount: hasDisc ? od : 1, disc_from: hasDisc ? 'manual' : 'base'
+        discount: hasDisc ? od : 1, disc_from: hasDisc ? 'manual' : 'base',
+        // 🔴 2026-11-03：复制出来的折扣是**原单历史折扣**，不是用户改的 → disc_changed = false
+        //   （服务端据此逐分沿用历史成交价；用户真改了折扣框才会置 true）
+        disc_changed: false,
+        // 🔴 折扣上限 = 原单历史折扣（退货模式才生效，与服务端 ceiling 一致）
+        disc_ceil: hasDisc ? od : 1
       };
     });
     await loadCustPrices(o.customer_id);
@@ -2874,7 +2937,13 @@ if (d.trust_full) {
         product_id: it.product_id, name: it.product_name, spec: it.spec, unit: it.unit,
         price: base, from: 'manual', qty: q,
         pack_size: Number(pr && pr.pack_size) || 0,
-        discount: hasDisc ? od : 1, disc_from: hasDisc ? 'manual' : 'base'
+        discount: hasDisc ? od : 1, disc_from: hasDisc ? 'manual' : 'base',
+        // 🔴 2026-11-03：编辑退货单时还原出来的折扣 = **历史折扣**，用户还没动过
+        //   → disc_changed = false → 服务端逐分沿用历史成交价（v5.7.8 语义不变）。
+        //   用户在折扣框里真的改了之后，onchange 才会置 true → 服务端按新折扣重算。
+        disc_changed: false,
+        // 🔴 折扣上限 = 历史折扣（退货模式才生效，与服务端 ceiling 一致）
+        disc_ceil: hasDisc ? od : 1
       };
     });
     await loadCustPrices(o.customer_id);
@@ -3703,9 +3772,10 @@ if (d.trust_full) {
     BOLD_ON: [0x1B, 0x45, 0x01], BOLD_OFF: [0x1B, 0x45, 0x00], BIG: [0x1B, 0x21, 0x30],
     NORMAL: [0x1B, 0x21, 0x00], CUT: [0x1D, 0x56, 0x00], CODPAGE_GBK: [0x1B, 0x74, 0x0F], LF: [0x0A],
     // 🔴🔴 2026-10-29 经理报修「打印出来数字 6 和 8 太像了」。
-    //   根因：ESC/POS 内置 Font A = 12×24 点阵，「8」与「6」的差异**只有右上角那根 1 点宽竖笔画**，
-    //   48 列小票上数字区密集排布 → 快速扫视时容易串读。字库改不了
-    //   （Font B 9×17 更窄更密，更难分；自定义字模 GS ( k 机型固件兼容风险高）→ 只能从**打印方式**下手。
+    //   根因：ESC/POS 内置 Font A = 12×24 点阵，「8」与「6」的字形差异**只有右上角那根
+    //   1 点宽竖笔画**（8 上部闭环、6 上部右上空白）。热敏纸 203dpi 下这根细竖容易糊断，
+    //   于是「8」被看成「6」。字库改不了（Font B 9×17 更窄更密，更难分；
+    //   自定义字模 GS ( k 机型固件兼容风险高）→ 只能从**打印方式**上让它更好认。
     //   ✅ 三招（同时上）：① 数字区加竖线分区；② 整个数字区加粗（ESC E，竖画 1 点→2 点）；
     //      ③ 合计「优惠后金额」用**横向 2 倍**大字。
     //   🔴 倍宽指令选型（极易踩坑）：
@@ -3853,13 +3923,13 @@ if (d.trust_full) {
       const it = items[i];
       const q = Number(it.qty || 0), p = Number(it.price || 0);
       qtySum += q;
-      await b.text(clipW((i + 1) + ' ' + (it.name || ''), RCOLS)); b.raw(ESC.LF);
-      const bc = String(it.barcode || '').trim();
       // 原价 = 折前单价（it.orig_price）；老单没这字段时兜回成交价，绝不印 0.00
       const op = (it.orig_price != null && Number(it.orig_price) > 0) ? Number(it.orig_price) : p;
       const amt = (it.subtotal != null && Number(it.subtotal) !== 0) ? Number(it.subtotal) : q * p;
       // 🔴 明细行整块加粗 —— 商品名里有数字（200ml/125g）、条码更是纯数字
       b.raw(ESC.BOLD_ON);
+      await b.text(clipW((i + 1) + ' ' + (it.name || ''), RCOLS)); b.raw(ESC.LF);
+      const bc = String(it.barcode || '').trim();
       // 🔴 LEFT_W = 18，「条码:」(5 列) + 13 位数字 = 18 列刚好放得下；
       //    放不下就整行独放，绝不截断末位条码。
       const nums = R_VBAR + lPadN(fmtQtyNum(q) + (it.unit || ''), R_QTYW)
@@ -3870,7 +3940,7 @@ if (d.trust_full) {
         await b.text(clipW('条码:' + bc, RCOLS)); b.raw(ESC.LF);
         await b.text(rPad('', R_LEFTW) + nums); b.raw(ESC.LF);
       } else {
-        // 🔴 LEFT_W = 18，「条码:」+ 13 位数字 = 18 列刚好放下，不截断
+        // 🔴 LEFT_W = 18，「条码:」(5 列) + 13 位数字 = 18 列刚好放下，不截断
         await b.text(rPad(bc ? '条码:' + bc : '', R_LEFTW) + nums);
         b.raw(ESC.LF);
       }

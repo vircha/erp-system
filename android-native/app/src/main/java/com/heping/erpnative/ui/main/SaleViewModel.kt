@@ -39,7 +39,23 @@ data class CartLine(
     val product: Product,
     var qty: Double,
     var price: Double,
-    var discount: Double = 1.0
+    var discount: Double = 1.0,
+    // 🔴🔴 2026-11-03 经理报修「移动版退货单没法修改折扣」：
+    //   本行折扣**被用户实际改动过**的标记（没动就是 false）。
+    //   服务端退货取价**只看这个标记**，不看折扣数值 ——
+    //   因为两端「折前×折扣≈成交价」的容差不同（网页 0.01 / 移动 0.05 / 服务端 0.02），
+    //   靠数值猜「改没改」必然误判（老单 orig_price 缺失时服务端把折扣当 1 → 金额被重算，
+    //   偏离「退货金额按历史」这条底线）。
+    //   · false / 缺失 → 成交价 = 历史成交价，一分不差（v5.7.8 语义不变）
+    //   · true        → 成交价 = 服务端历史折前价 × 新折扣（可协商让利/扣损）
+    var discChanged: Boolean = false,
+    // 🔴 2026-11-03：折扣**上限** = 该行的历史折扣（退货模式用）。
+    //   服务端 returnLineEditable() 的 ceiling 就是 hist.discount —— 折扣只能往下调
+    //   （协商让利/扣损），往上调会被压回历史成交价（退的钱不能比当初卖出去的多）。
+    //   客户端按同一条上限夹紧 → 两端显示与服务端实际入库值一致（不然用户输 1.0
+    //   界面显示 1.0、实际却按 0.9 退，账目对不上会以为系统算错）。
+    //   销售单模式不设限（这里恒为 1）。
+    var discCeil: Double = 1.0
 ) {
     /** 折后成交单价 */
     fun unitPrice(): Double = (price * discount).round2()
@@ -200,7 +216,12 @@ class SaleViewModel : ViewModel() {
         // 否则购物车显示「-2 件」，用户再提交会让服务端按 qty 再翻一次负号。
         // （提交时客户端一律传正数量，负号统一由服务端按 sign 处理。）
         val q = kotlin.math.abs(qty)
-        return CartLine(p, q, base, if (hasDisc) od.coerceIn(0.1, 1.0) else 1.0)
+        // 🔴 discChanged = false：还原出来的折扣就是**历史折扣**，没被用户动过 →
+        //   服务端按历史成交价原样处理（v5.7.8 语义，一分不差）。
+        //   只有用户真的在折扣框里改了，才置 true（见 setItemDiscount）。
+        // 🔴 discCeil = 历史折扣 = 折扣上限（与服务端 returnLineEditable 的 ceiling 同口径）。
+        val restoredDisc = if (hasDisc) od.coerceIn(0.1, 1.0) else 1.0
+        return CartLine(p, q, base, restoredDisc, discChanged = false, discCeil = restoredDisc)
     }
 
     private fun fmtDiscInput(d: Double): String {
@@ -318,7 +339,10 @@ class SaleViewModel : ViewModel() {
             val price = priceMap[p.id] ?: p.price
             // 该门店对这件商品上次用的折扣，自动带出来（没有记录就是 1，不打折）
             val disc = itemDiscountMap[p.id] ?: 1.0
-            cart = cart + CartLine(p, 1.0, price, disc)
+            // 🔴 discChanged 默认 false —— 新加的行折扣是**带出来的历史折扣**，不是用户改的。
+            //   退货模式下服务端据此逐分沿用历史成交价。
+            // 🔴 discCeil = 带出来的历史折扣 = 折扣上限（退货模式才生效，与服务端 ceiling 同口径）。
+            cart = cart + CartLine(p, 1.0, price, disc, discChanged = false, discCeil = disc)
         }
     }
 
@@ -351,7 +375,21 @@ class SaleViewModel : ViewModel() {
     fun setItemDiscount(idx: Int, disc: Double) {
         val list = cart.toMutableList()
         if (idx in list.indices) {
-            list[idx] = list[idx].copy(discount = disc.coerceIn(0.1, 1.0))
+            // 🔴🔴 2026-11-03：这里**唯一**是用户手动改单品折扣的入口（SaleScreen 的 ItemDiscountBox）。
+            //   一旦改了就置 discChanged = true —— 服务端据此判定「这行折扣被协商过」，
+            //   按「历史折前价 × 新折扣」重算；没改过的行 discChanged 保持 false，
+            //   服务端逐分沿用历史成交价（v5.7.8 语义不变）。
+            //   🔴 老客户端不传该字段 → 服务端一律按「没改」处理 → 绝不回归。
+            var d = disc.coerceIn(0.1, 1.0)
+            // 🔴 退货模式下折扣**上限 = 历史折扣**（与服务端 ceiling 同口径）：
+            //   往上调（想让客户多拿钱）会被服务端压回历史成交价；这里提前夹紧，
+            //   免得界面显示 1.0、实际却按 0.9 退 —— 账目对不上会以为系统算错。
+            //   往下调（协商让利 / 扣损）不受限，这正是本次要的能力。
+            if (isReturnMode) {
+                val ceil = list[idx].discCeil
+                if (ceil > 0 && d > ceil) d = ceil
+            }
+            list[idx] = list[idx].copy(discount = d, discChanged = true)
             cart = list
         }
     }
@@ -359,11 +397,12 @@ class SaleViewModel : ViewModel() {
     /** 整单统一设折扣：只改各行的单品折扣，不动整单折扣字段 */
     fun applyDiscountToAll(disc: Double) {
         val d = disc.coerceIn(0.1, 1.0)
-        cart = cart.map { it.copy(discount = d) }
+        // 🔴 批量改折扣 = 也是「改过」，同样置 discChanged（否则服务端会忽略这次批量操作）。
+        cart = cart.map { it.copy(discount = d, discChanged = true) }
     }
 
     /** 全部行恢复不打折 */
-    fun resetAllDiscounts() { cart = cart.map { it.copy(discount = 1.0) } }
+    fun resetAllDiscounts() { cart = cart.map { it.copy(discount = 1.0, discChanged = true) } }
 
     fun removeAt(idx: Int) {
         cart = cart.toMutableList().also { if (idx in it.indices) it.removeAt(idx) }
@@ -433,7 +472,13 @@ class SaleViewModel : ViewModel() {
                     productId = it.product.id,
                     qty = it.qty,
                     price = it.price,
-                    discount = it.discount
+                    discount = it.discount,
+                    // 🔴 2026-11-03「移动版退货单没法修改折扣」：
+                    //   上报「这行折扣被用户改过没」。服务端退货取价只看这个标记，不看折扣数值。
+                    //   false/缺失 → 成交价 = 历史成交价，一分不差（v5.7.8 语义不变）
+                    //   true       → 成交价 = 服务端历史折前价 × 新折扣（可协商让利/扣损）
+                    //   🔴 销售单路径服务端忽略该字段，不受影响。
+                    discChanged = it.discChanged
                 )
             },
             discount = if (d != 1.0) d else null,
