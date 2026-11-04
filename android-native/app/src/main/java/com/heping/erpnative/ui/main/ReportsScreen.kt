@@ -37,7 +37,7 @@ private val TABS_AR = listOf("欠款汇总" to "ar", "账龄分析" to "aging", 
 private val TABS_STOCK = listOf("库存预警" to "stock")
 
 @Composable
-fun ReportsScreen(analyticsVm: AnalyticsViewModel, arVm: ArViewModel) {
+fun ReportsScreen(analyticsVm: AnalyticsViewModel, arVm: ArViewModel, onBack: () -> Unit = {}) {
     var tab by remember { mutableStateOf("sales") }
 
     // 按当前页签懒加载（第一次进来才拉）
@@ -53,7 +53,7 @@ fun ReportsScreen(analyticsVm: AnalyticsViewModel, arVm: ArViewModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar("报表")
+        TopBar("报表", onBack)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp)) {
 
             // ---- 分组页签（只放标题，内容常驻） ----

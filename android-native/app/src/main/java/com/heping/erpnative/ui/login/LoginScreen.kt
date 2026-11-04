@@ -2,11 +2,13 @@ package com.heping.erpnative.ui.login
 
 import android.content.Intent
 import android.widget.ImageView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -17,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -28,6 +31,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import com.caverock.androidsvg.SVG
 import kotlinx.coroutines.launch
 import com.heping.erpnative.BuildConfig
+import com.heping.erpnative.R
 import com.heping.erpnative.data.Book
 import com.heping.erpnative.data.SessionStore
 import com.heping.erpnative.ui.components.ErrorText
@@ -123,8 +127,13 @@ fun LoginScreen(onEntered: () -> Unit, vm: AuthViewModel = viewModel()) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text("简单ERP", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(4.dp))
+        // 🔴 v5.7.14 经理「app名称不用写（原生）」：原生 App 不再写应用名，用图标代替
+        Image(
+            painter = painterResource(R.mipmap.ic_launcher),
+            contentDescription = null,
+            modifier = Modifier.size(64.dp).clip(RoundedCornerShape(16.dp))
+        )
+        Spacer(Modifier.height(8.dp))
         TextButton(onClick = { openUrl(ctx, WEB_URL) }) {
             Icon(Icons.Filled.Language, null, Modifier.size(16.dp))
             Spacer(Modifier.width(4.dp))
@@ -237,7 +246,7 @@ private fun TrustedPanel(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Text("简单ERP", style = MaterialTheme.typography.headlineSmall)
+        // 🔴 v5.7.14 经理「app名称不用写（原生）」：免密面板同样不写应用名
         Spacer(Modifier.height(28.dp))
 
         // 头像

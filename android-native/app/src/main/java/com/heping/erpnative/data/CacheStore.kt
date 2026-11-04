@@ -27,7 +27,9 @@ object CacheStore {
     @Volatile var lastProductStore: Int? = null
         private set
 
-    private fun ordersKey(from: String, to: String) = stringPreferencesKey("orders_${from}_$to")
+    // 🔴 v5.7.15：缓存键必须带「仅退货」标记 —— 否则离线时「仅退货」会读到未筛选的全量列表（假数据）。
+    private fun ordersKey(from: String, to: String, onlyReturns: Boolean = false) =
+        stringPreferencesKey("orders_${from}_$to" + if (onlyReturns) "_ret" else "")
 
     private inline fun <reified T> fromJson(s: String?): List<T> {
         if (s.isNullOrEmpty()) return emptyList()
@@ -53,11 +55,15 @@ object CacheStore {
         fromJson(SessionStore.appContext.cacheStore.data.first()[PRODUCTS])
 
     // ---------- 订单（按区间缓存） ----------
-    suspend fun putOrders(from: String, to: String, list: List<Order>) {
-        SessionStore.appContext.cacheStore.edit { it[ordersKey(from, to)] = toJson(list) }
+    suspend fun putOrders(from: String, to: String, list: List<Order>, onlyReturns: Boolean = false) {
+        SessionStore.appContext.cacheStore.edit { it[ordersKey(from, to, onlyReturns)] = toJson(list) }
     }
-    suspend fun getOrders(from: String, to: String): List<Order> =
-        fromJson(SessionStore.appContext.cacheStore.data.first()[ordersKey(from, to)])
+    // 🔴 只返回**确实存过**的缓存：默认空列表会让「离线+无缓存」误判成「查询结果为空」
+    suspend fun getOrders(from: String, to: String, onlyReturns: Boolean = false): List<Order> {
+        val k = ordersKey(from, to, onlyReturns)
+        val raw = SessionStore.appContext.cacheStore.data.first()[k]
+        return fromJson<Order>(raw)
+    }
 
     // ---------- 退货单（固定缓存） ----------
     private val RETURNS = stringPreferencesKey("returns")

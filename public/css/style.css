@@ -930,3 +930,76 @@ mark{background:#fff2a8;color:inherit;padding:0 1px;border-radius:2px;}
   .pu-fb-sub{grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;}
   .pu-fb-b{font-size:10px;}
 }
+
+/* ---------- 账户级功能权限面板（2026-11-04） ---------- */
+.perm-panel{border:1px solid var(--line,#e3e6ec);border-radius:8px;padding:10px;margin-top:6px;max-height:46vh;overflow:auto;background:var(--card,#fff);}
+.perm-mode{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;margin-bottom:8px;}
+.perm-mode label{display:flex;align-items:center;gap:5px;cursor:pointer;}
+.perm-presets{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:8px;border-bottom:1px dashed var(--line,#e3e6ec);}
+.perm-presets .muted{font-size:12px;}
+.perm-group{margin-bottom:10px;}
+.perm-group-t{font-size:12px;font-weight:700;color:var(--muted,#7a8290);margin-bottom:5px;}
+.perm-items{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:5px;}
+.perm-chk{display:flex;align-items:center;gap:5px;font-size:13px;padding:4px 6px;border:1px solid var(--line,#e3e6ec);border-radius:5px;cursor:pointer;}
+.perm-chk input{margin:0;}
+.perm-chk:has(input:disabled){opacity:.5;cursor:not-allowed;}
+
+/* ---------- 功能抽屉（2026-11-04，参考管家婆宫格） ---------- */
+.func-drawer{position:fixed;inset:0;z-index:1200;}
+.func-drawer.hidden{display:none;}
+.func-mask{position:absolute;inset:0;background:rgba(15,23,42,.42);}
+.func-panel{position:absolute;right:0;top:0;bottom:0;width:min(480px,92vw);background:var(--card,#fff);
+  box-shadow:-6px 0 24px rgba(0,0,0,.16);display:flex;flex-direction:column;animation:funcIn .18s ease-out;}
+@keyframes funcIn{from{transform:translateX(30px);opacity:.4}to{transform:none;opacity:1}}
+.func-head{display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid var(--border,#e3e6ec);font-size:16px;}
+.func-x{border:none;background:none;font-size:26px;line-height:1;cursor:pointer;color:var(--muted,#7a8290);}
+.func-grid{flex:1;overflow:auto;padding:14px 18px;}
+.func-sec{margin-bottom:16px;}
+.func-sec-t{font-size:12px;font-weight:700;color:var(--muted,#7a8290);margin-bottom:8px;letter-spacing:.5px;}
+.func-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;}
+.func-card{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;
+  padding:14px 6px;border:1px solid var(--border,#e3e6ec);border-radius:10px;background:var(--card,#fff);
+  cursor:pointer;transition:.15s;}
+.func-card:hover{border-color:var(--primary,#07c160);background:rgba(7,193,96,.06);transform:translateY(-2px);}
+.fc-ico{font-size:26px;line-height:1;}
+.fc-t{font-size:12px;font-weight:600;}
+.func-foot{padding:10px 18px;font-size:11px;border-top:1px solid var(--border,#e3e6ec);}
+/* 资金 / 提成 */
+.fund-sum{display:flex;gap:18px;margin-top:12px;flex-wrap:wrap;}
+.fund-kpi{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted,#7a8290);}
+.fund-kpi b{font-size:20px;color:var(--text,#1f2b3a);}
+.up{color:#c0392b;} .down{color:#0a8f4e;}
+.fund-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;align-items:center;}
+.fund-form input,.fund-form select{width:100%;}
+.cm-rate{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;font-size:13px;}
+.cm-big{margin-left:auto;font-size:14px;} .cm-big b{font-size:22px;color:#c0392b;}
+.cm-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;}
+.cm-kpis>div{display:flex;flex-direction:column;gap:4px;padding:10px;border:1px solid var(--border,#e3e6ec);border-radius:8px;font-size:12px;color:var(--muted,#7a8290);}
+.cm-kpis b{font-size:19px;color:var(--text,#1f2b3a);}
+@media(max-width:640px){.func-panel{width:100vw;}.func-cards{grid-template-columns:repeat(3,1fr);}}
+
+/* ---------- 功能中心页（主区域宫格，2026-11-04 定稿：不用抽屉） ---------- */
+.func-page{max-width:980px;}
+.func-page .func-sec{margin-bottom:22px;}
+.func-page .func-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px;}
+.func-page .func-card{padding:26px 10px;border-radius:14px;}
+.func-page .fc-ico{font-size:38px;}
+.func-page .fc-t{font-size:14px;}
+
+/* ---------- 网页版布局优化（2026-11-04）：按页限宽，消灭宽屏大片空白 ---------- */
+.page-me{max-width:860px;}
+.page-me .me-top{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:12px;}
+.page-orders,.page-analytics,.page-customers,.page-products,.page-purchase{max-width:1180px;}
+.page-functions{max-width:980px;}
+
+/* ---------- 设置页双列分栏（2026-11-04 二次定稿：语义分栏，非单纯限宽） ---------- */
+.page-me{max-width:1280px;}
+.me-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start;}
+.me-cols .me-col{min-width:0;}
+/* 非 boss：可分栏区块少 → 单列居中（内容少时居中是标准做法） */
+.me-single{grid-template-columns:1fr;max-width:860px;margin:0 auto;}
+.me-top{max-width:1280px;}
+@media(max-width:1080px){
+  .me-cols{grid-template-columns:1fr;}
+  .me-single{max-width:none;}
+}

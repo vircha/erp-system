@@ -7,10 +7,20 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
@@ -18,7 +28,6 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -26,6 +35,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -80,16 +91,14 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
     var pendingCount by remember { mutableStateOf(0) }
 
     // 各分区默认展开状态：账户信息 + 外观/主题 + 版本/更新 默认展开，其余折叠，降低视觉杂乱
+    // 🔴 v5.7.13 排版优化：折叠栏从 5 个合并为 2 组
+    //    ① 账户与账套  ② 通用（网页 / 主题 / 信任设备）
     var expAccount by remember { mutableStateOf(true) }
-    var expTheme by remember { mutableStateOf(true) }
+    var expCommon by remember { mutableStateOf(false) }
     var expUpdate by remember { mutableStateOf(true) }
     var expBt by remember { mutableStateOf(false) }
     var expPw by remember { mutableStateOf(false) }
     var expShop by remember { mutableStateOf(isBoss) }
-    // v5.5：账套切换 + 信任设备 + 网页版入口
-    var expBook by remember { mutableStateOf(true) }
-    var expTrust by remember { mutableStateOf(false) }
-    var expWeb by remember { mutableStateOf(false) }
 
     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
         arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
@@ -135,7 +144,7 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
         }
 
         // 账户信息
-        CollapsibleSection("账户信息", expAccount, { expAccount = !expAccount }) {
+        CollapsibleSection("账户与账套", expAccount, { expAccount = !expAccount }) {
             Text("账号：${SessionStore.displayName.ifEmpty { "-" }}")
             Spacer(Modifier.height(6.dp))
             Text("角色：${SessionStore.role}")
@@ -143,10 +152,11 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
             Text("门店：${SessionStore.shopName.ifEmpty { SessionStore.bookName }}")
             Spacer(Modifier.height(6.dp))
             Text("套账 ID：${SessionStore.bookId}")
-        }
-
-        // 🔴 v5.5：账套切换（网页版同功能）。所有角色可用。
-        CollapsibleSection("账套切换", expBook, { expBook = !expBook }) {
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(10.dp))
+            Text("账套", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
             Text(
                 "当前账套：${SessionStore.bookName.ifEmpty { "-" }}（ID ${SessionStore.bookId}）",
                 style = MaterialTheme.typography.bodyMedium
@@ -207,7 +217,8 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
         }
 
         // v5.5：信任设备（本机解绑入口）
-        CollapsibleSection("信任设备", expTrust, { expTrust = !expTrust }) {
+        CollapsibleSection("通用（网页 / 主题 / 信任设备）", expCommon, { expCommon = !expCommon }) {
+            Text("信任设备", fontWeight = FontWeight.Bold)
             Text(
                 if (SessionStore.deviceToken != null)
                     "本机已被记住，30 天内可免密登录。不想被记住就在这里解绑。"
@@ -221,10 +232,11 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
                 enabled = SessionStore.deviceToken != null,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
             ) { Text("解除本机设备信任") }
-        }
-
-        // v5.5：网页版入口
-        CollapsibleSection("网页版", expWeb, { expWeb = !expWeb }) {
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(10.dp))
+            Text("网页版", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
             Text("在浏览器里打开 ERP（与手机版数据实时同步）", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(10.dp))
             Button(onClick = { openWeb(ctx) }, modifier = Modifier.fillMaxWidth()) {
@@ -234,10 +246,11 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
             }
             Spacer(Modifier.height(6.dp))
             Text(WEB_URL, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        // 外观 / 主题切换
-        CollapsibleSection("外观 / 主题", expTheme, { expTheme = !expTheme }) {
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(10.dp))
+            Text("主题", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val cur = AppThemeState.mode.value
                 val opts = listOf(
@@ -492,7 +505,19 @@ private fun openWeb(ctx: android.content.Context) {
     } catch (_: Exception) {}
 }
 
-/** 可折叠分区：标题栏点按展开/收起 */
+/**
+ * 可折叠分区：标题栏点按展开/收起。
+ *
+ * 🔴 v5.7.14 经理反馈「设置里面的折叠 添加流畅的折叠动画或者修改ui显示」：
+ *   原来只有 `if (expanded)` 硬切，展开是「啪」一下撑开，收起也是硬切，
+ *   观感生硬、且长内容（蓝牙打印/账户安全）收起时页面高度突变。
+ *   本版改为：
+ *   ① 展开/收起走 AnimatedVisibility（expandVertically 高度过渡 + fadeIn/fadeOut 透明度）
+ *   ② 箭头用 animateFloatAsState 旋转 0°→180°，视觉上明确当前状态
+ *   ③ 标题栏加浅色底 + 圆角，明确「这一行可点」
+ *   🔴 不再叠加 animateContentSize —— 它和 expandVertically 会各自跑一套高度动画，
+ *      父卡片尺寸二次追赶 → 观感「弹一下」，只留 AnimatedVisibility 一条动画链。
+ */
 @Composable
 private fun CollapsibleSection(
     title: String,
@@ -500,20 +525,49 @@ private fun CollapsibleSection(
     onToggle: () -> Unit,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    // 箭头旋转：展开 180°（朝上），收起 0°（朝下）
+    val arrowRot by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+        label = "secArrowRot"
+    )
     Card(Modifier.fillMaxWidth().padding(12.dp)) {
         Column(Modifier.fillMaxWidth()) {
             Row(
-                Modifier.fillMaxWidth().clickable { onToggle() }.padding(16.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp))
+                    .background(
+                        if (expanded) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+                    )
+                    .clickable { onToggle() }
+                    .padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (expanded) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier.weight(1f)
+                )
                 Icon(
-                    if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(arrowRot)
                 )
             }
-            if (expanded) {
+            // 内容区：高度 + 透明度双过渡
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(
+                    animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                ) + fadeIn(animationSpec = tween(durationMillis = 180)),
+                exit = shrinkVertically(
+                    animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
+                ) + fadeOut(animationSpec = tween(durationMillis = 120))
+            ) {
                 Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
                     content()
                 }

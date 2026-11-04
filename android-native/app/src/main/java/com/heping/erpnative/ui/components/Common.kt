@@ -3,6 +3,8 @@ package com.heping.erpnative.ui.components
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -107,12 +109,20 @@ fun CenteredMessage(msg: String) {
 }
 
 @Composable
-fun TopBar(title: String) {
+fun TopBar(title: String, onBack: (() -> Unit)? = null) {
     Surface(shadowElevation = 2.dp) {
-        Box(
-            Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 16.dp),
-            contentAlignment = Alignment.CenterStart
+        Row(
+            Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            // 🔴 v5.7.13：二级页（采购/商品/客户/报表）从「功能」宫格进入，需要返回按钮
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "返回")
+                }
+            } else {
+                Spacer(Modifier.width(8.dp))
+            }
             Text(title, style = MaterialTheme.typography.titleLarge)
         }
     }

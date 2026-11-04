@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">简单ERP(原生)</string>
+    <!-- 🔴 v5.7.14 经理「app名称不用写（原生）」：桌面图标名去掉「(原生)」后缀 -->
+    <string name="app_name">简单ERP</string>
 </resources>

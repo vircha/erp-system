@@ -25,19 +25,34 @@ class OrdersViewModel : ViewModel() {
     var error by mutableStateOf<String?>(null)
     var returning by mutableStateOf(false)
     var offline by mutableStateOf(false)
-    var from by mutableStateOf(todayStr())
-    var to by mutableStateOf(todayStr())
+    // 🔴 v5.7.15 修「日期『全部』点了不生效」：原来 from/to 是**非空** String，
+    //    而 loadOrders(f,t) 里 `if (f != null) from = f` —— setAll() 传 null 被这行直接忽略，
+    //    from/to 保持旧值，随后仍按旧区间查询 → 「全部」等于只是刷新了同一区间。
+    //    改成可空后 null 才真正表示「不限日期」。
+    var from by mutableStateOf<String?>(todayStr())
+    var to by mutableStateOf<String?>(todayStr())
+    // 🔴 v5.7.15「仅退货」从**客户端过滤**改为**服务端 status 过滤**：
+    //    原来是在已取回的 orders 上 filter，而服务端无区间时 LIMIT 200、有关键词时 500，
+    //    退货单一旦被 LIMIT 截断就显示「暂无退货单」（假空）。交给服务端 status=returned 才准。
+    var onlyReturns by mutableStateOf(false)
 
-    fun loadOrders(f: String? = from, t: String? = to) {
-        if (f != null) from = f
-        if (t != null) to = t
+    /**
+     * 按当前 from/to/onlyReturns 查询（不改变筛选条件）。
+     * 🔴 与 setRange 分开：默认参数无法区分「不传」和「显式传 null」，
+     *    合在一起就会重演上面那个「全部不生效」的 Bug。
+     */
+    fun loadOrders() {
         viewModelScope.launch {
             loading = true; error = null; offline = false
             try {
-                orders = ErpClient.api.orders(from = from, to = to)
-                CacheStore.putOrders(from ?: "null", to ?: "null", orders)
+                orders = ErpClient.api.orders(
+                    from = from,
+                    to = to,
+                    status = if (onlyReturns) "returned" else null
+                )
+                CacheStore.putOrders(from ?: "null", to ?: "null", orders, onlyReturns)
             } catch (e: Exception) {
-                val cached = try { CacheStore.getOrders(from ?: "null", to ?: "null") } catch (_: Exception) { emptyList() }
+                val cached = try { CacheStore.getOrders(from ?: "null", to ?: "null", onlyReturns) } catch (_: Exception) { emptyList() }
                 if (cached.isNotEmpty()) {
                     orders = cached
                     offline = isNetworkError(e)
@@ -47,10 +62,27 @@ class OrdersViewModel : ViewModel() {
         }
     }
 
-    fun setToday() = loadOrders(todayStr(), todayStr())
-    fun setLast7() = loadOrders(daysAgo(6), todayStr())
-    fun setMonth() = loadOrders(monthStart(), todayStr())
-    fun setAll() = loadOrders(null, null)
+    /** 设置日期区间并查询；f/t 传 null = 不限（服务端返回全部，不限日期） */
+    fun setRange(f: String?, t: String?) {
+        from = f; to = t
+        loadOrders()
+    }
+
+    /**
+     * 切换「仅退货」筛选（与服务端 status 对齐）。
+     * 🔴 方法名不能叫 setOnlyReturns —— 那是 `var onlyReturns` 自动生成的 setter，
+     *    JVM 签名完全相同 → "Platform declaration clash" 编译失败。
+     */
+    fun applyOnlyReturns(v: Boolean) {
+        if (onlyReturns == v) return
+        onlyReturns = v
+        loadOrders()
+    }
+
+    fun setToday() = setRange(todayStr(), todayStr())
+    fun setLast7() = setRange(daysAgo(6), todayStr())
+    fun setMonth() = setRange(monthStart(), todayStr())
+    fun setAll() = setRange(null, null)
 
     fun loadDetail(id: Int) {
         viewModelScope.launch {

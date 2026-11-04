@@ -50,6 +50,8 @@ const ROLES = {
       //    且 /api/report/stock-alert 要 inventory.view —— 经理有 edit 却没有 view，
       //    结果经理既看不到「报表」菜单，库存预警接口还直接 403。
       'inventory.view', 'analysis.view',
+      // 🔴 2026-11-04 资金管理与员工提成：经理可看/记资金流水、可设提成比例
+      'fund.view', 'fund.edit', 'commission.view', 'commission.edit',
       // 🔴 2026-10-21 采购与库存：经理可看采购建议/采购单、可建采购单（建单即入库）。
       //    staff 不给（采购进价是成本信息）；customer 不给（perms 里没有 → need() 直接 403）。
       'purchase.view', 'purchase.edit'
@@ -78,6 +80,78 @@ function can(role, perm) {
   if (!r) return false;
   if (r.perms.includes('*')) return true;
   return r.perms.includes(perm);
+}
+
+// ---------- 账户级权限（2026-11-04）----------
+// 🔴 权限清单是**唯一真源**：前端勾选面板、服务端白名单校验都从这里取。
+//    分组只为展示；key 必须与服务端 need('xxx') 用的字符串逐字一致。
+const PERM_CATALOG = [
+  { group: '开单与订单', items: [
+    { key: 'sale.create', label: '开单' },
+    { key: 'order.view', label: '查看订单' },
+    { key: 'order.edit', label: '编辑订单' },
+    { key: 'order.return', label: '退货' },
+    { key: 'order.print', label: '打印小票' },
+    { key: 'order.delete', label: '删除订单' }
+  ]},
+  { group: '商品与库存', items: [
+    { key: 'product.view', label: '查看商品' },
+    { key: 'product.edit', label: '修改商品' },
+    { key: 'product.import', label: '导入商品' },
+    { key: 'inventory.view', label: '查看库存' },
+    { key: 'inventory.edit', label: '调整库存' }
+  ]},
+  { group: '采购', items: [
+    { key: 'purchase.view', label: '查看采购' },
+    { key: 'purchase.edit', label: '建采购单' }
+  ]},
+  { group: '客户与价格', items: [
+    { key: 'customer.view', label: '查看客户' },
+    { key: 'customer.edit', label: '修改客户' },
+    { key: 'price.view', label: '查看价格' },
+    { key: 'price.edit', label: '修改价格' }
+  ]},
+  { group: '资金与报表', items: [
+    { key: 'ar.view', label: '应收/欠款' },
+    { key: 'ar.edit', label: '收款登记' },
+    { key: 'fund.view', label: '资金流水' },
+    { key: 'fund.edit', label: '记一笔收支' },
+    { key: 'analysis.view', label: '经营报表' },
+    { key: 'commission.view', label: '员工提成' },
+    { key: 'commission.edit', label: '设置提成比例' }
+  ]},
+  { group: '设置与管理', items: [
+    { key: 'settings.edit', label: '店铺设置' },
+    { key: 'profile.edit', label: '修改个人资料' }
+  ]}
+];
+const ALL_PERMS = new Set(PERM_CATALOG.flatMap(g => g.items.map(i => i.key)));
+// 快捷预设：经理要的「员工只能开单」（含查看/打印自己开的单）
+const PERM_PRESETS = {
+  sale_only: ['sale.create', 'order.view', 'order.print', 'product.view', 'price.view'],
+  sale_returns: ['sale.create', 'order.view', 'order.return', 'order.print', 'product.view', 'inventory.view', 'price.view']
+};
+
+/** 账户自定义权限；返回 null = 未自定义（沿用角色默认） */
+function accountPerms(acc) {
+  if (!acc || acc.perms == null || String(acc.perms).trim() === '') return null;
+  try {
+    const p = JSON.parse(String(acc.perms));
+    return Array.isArray(p) ? p.filter(x => ALL_PERMS.has(x)) : null;
+  } catch (e) { return null; }
+}
+/** 该账户**实际生效**的权限（登录/me 返回这个，前端菜单据此显隐） */
+function effectivePerms(acc) {
+  const custom = accountPerms(acc);
+  if (custom) return custom.slice();
+  return permsOf(acc ? acc.role : 'staff');
+}
+/** 接口鉴权统一入口：账户自定义优先，否则回落角色默认 */
+function canCtx(ctx, perm) {
+  if (!ctx) return false;
+  const custom = accountPerms(ctx.account);
+  const list = custom || (ROLES[ctx.role] ? ROLES[ctx.role].perms : []);
+  return list.includes('*') || list.includes(perm);
 }
 
 // ---------- 客户角色的数据隔离（2026-10-18；2026-10-19 支持多门店）----------
@@ -925,7 +999,7 @@ async function handleApi(req, res, u) {
       const tok = newSession(acc);
       const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId);
       const _rIds = custStoreIdsOf(acc, bookId);
-      const outR = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book),
+      const outR = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: effectivePerms(acc), shopName: effShopName(book),
                     customerId: _rIds.indexOf(Number(acc.customer_id)) >= 0 ? Number(acc.customer_id) : (_rIds[0] || null), customerIds: _rIds };
       if (b.trust_device) {
         // 🔴 1.5.1：满 4 台时 token 为 null → 不下发免密令牌，但**登录照常成功**
@@ -965,7 +1039,7 @@ async function handleApi(req, res, u) {
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(acc.book_id);
     // 🔴 这个分支没有 bookId 变量（那是注册分支的局部变量），必须用 acc.book_id
     const _cIds = custStoreIdsOf(acc, acc.book_id || 1);
-    const out = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book), isAdmin: !!acc.is_admin, violations: MOD ? MOD.myPending(acc.id) : [],
+    const out = { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: effectivePerms(acc), shopName: effShopName(book), isAdmin: !!acc.is_admin, violations: MOD ? MOD.myPending(acc.id) : [],
                   customerId: _cIds.indexOf(Number(acc.customer_id)) >= 0 ? Number(acc.customer_id) : (_cIds[0] || null), customerIds: _cIds };
     // 勾选「信任此设备」→ 签发 30 天设备令牌
     if (b.trust_device) {
@@ -987,7 +1061,7 @@ async function handleApi(req, res, u) {
     touchTrusted(row.id);
     const tok = newSession(acc);
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(acc.book_id);
-    return sendJSON(res, 200, { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: permsOf(acc.role), shopName: effShopName(book), device_token: b.device_token });
+    return sendJSON(res, 200, { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: effectivePerms(acc), shopName: effShopName(book), device_token: b.device_token });
   }
   if (p === '/api/books/public' && method === 'GET') {
     // 注册时可选套账列表（仅名称/ID）
@@ -1004,14 +1078,17 @@ async function handleApi(req, res, u) {
   if (p.startsWith('/api/') && !ctx) return sendJSON(res, 401, { error: '未登录或会话已失效' });
   const bookId = ctx.bookId;
   const role = ctx.role;
-  const need = (perm) => { if (!can(role, perm)) { sendJSON(res, 403, { error: '当前角色（' + roleLabel(role) + '）无此权限' }); return false; } return true; };
+  // 🔴 账户级权限：不再按共享角色判定，按**当前账户**生效权限判定
+  const need = (perm) => { if (!canCtx(ctx, perm)) { sendJSON(res, 403, { error: '当前账户（' + roleLabel(role) + '）无此权限：' + perm }); return false; } return true; };
   let m;   // 路由正则匹配变量（全段共用，勿再重复 let）
 
   // ---------- 身份 / 套账 ----------
   if (p === '/api/me' && method === 'GET') {
     return sendJSON(res, 200, {
       account: pubAcc(ctx.account), book: pubBook(ctx.book), role, roleLabel: roleLabel(role),
-      perms: permsOf(role), shopName: effShopName(ctx.book),
+      perms: effectivePerms(ctx.account),
+      permsCustom: !!accountPerms(ctx.account),
+      shopName: effShopName(ctx.book),
       books: myBooks(ctx.account),
       customerId: ctx.customerId || null,
       // 2026-10-19 多门店：前端门店切换器的数据源（配合 customer_id= 传参取那家店的价格）
@@ -1152,10 +1229,20 @@ async function handleApi(req, res, u) {
   }
 
   // ---------- 账户与角色管理（仅老板） ----------
+  // 🔴 权限清单：编辑面板的唯一数据源，避免前端硬编码 key 与服务端 need() 漂移
+  if (p === '/api/perm-catalog' && method === 'GET') {
+    if (role !== 'boss') return sendJSON(res, 403, { error: '只有老板可以配置权限' });
+    const defaults = {};
+    for (const r of Object.keys(ROLES)) defaults[r] = permsOf(r);
+    return sendJSON(res, 200, { catalog: PERM_CATALOG, presets: PERM_PRESETS, roleDefaults: defaults });
+  }
   if (p === '/api/accounts' && method === 'GET') {
     if (role !== 'boss') return sendJSON(res, 403, { error: '只有老板可以管理账户' });
     const rows = db.prepare('SELECT * FROM accounts WHERE book_id=? ORDER BY id').all(bookId);
-    return sendJSON(res, 200, rows.map(pubAcc));
+    // 附带 effectivePerms / permsCustom，供编辑面板显示「跟随角色 / 自定义」
+    return sendJSON(res, 200, rows.map(a => Object.assign(pubAcc(a), {
+      perms: effectivePerms(a), permsCustom: !!accountPerms(a), roleDefaults: permsOf(a.role)
+    })));
   }
   if (p === '/api/accounts' && method === 'POST') {
     if (role !== 'boss') return sendJSON(res, 403, { error: '只有老板可以新增账户' });
@@ -1181,8 +1268,20 @@ async function handleApi(req, res, u) {
     if (b.password) db.prepare('UPDATE accounts SET password=? WHERE id=?').run(hashPassword(String(b.password)), m[1]);
     db.prepare('UPDATE accounts SET display_name=?, role=?, active=? WHERE id=?')
       .run(b.display_name != null ? String(b.display_name) : acc.display_name, r, b.active != null ? (b.active ? 1 : 0) : acc.active, m[1]);
+    // 🔴 账户级权限：perms=null → 清掉自定义、回落角色默认；数组 → 白名单过滤后存 JSON
+    //    禁止改自己：把当前登录老板的 perms 清空/改成空数组 = 把自己锁在系统外面。
+    if (b.perms !== undefined) {
+      if (Number(m[1]) === Number(ctx.account.id))
+        return sendJSON(res, 400, { error: '不能修改自己账户的权限（会把自己锁在外面）' });
+      if (b.perms === null || b.perms === 'role')
+        db.prepare('UPDATE accounts SET perms=NULL WHERE id=?').run(m[1]);
+      else {
+        const arr = Array.isArray(b.perms) ? b.perms.filter(x => ALL_PERMS.has(x)) : [];
+        db.prepare('UPDATE accounts SET perms=? WHERE id=?').run(JSON.stringify(arr), m[1]);
+      }
+    }
     db.prepare('UPDATE books SET owner_account_id=? WHERE id=? AND owner_account_id IS NULL').run(m[1], acc.book_id);
-    return sendJSON(res, 200, { ok: true });
+    return sendJSON(res, 200, { ok: true, perms: effectivePerms(db.prepare('SELECT * FROM accounts WHERE id=?').get(m[1])) });
   }
   if (m && method === 'DELETE') {
     if (role !== 'boss') return sendJSON(res, 403, { error: '只有老板可以删除账户' });
@@ -2312,7 +2411,9 @@ async function handleApi(req, res, u) {
     const rno = genReturnNo(bookId);
     db.exec('BEGIN');
     try {
-      const ri = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,return_of) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rno, o.customer_id, o.customer_name, -o.total, -pay, o.discount != null ? o.discount : 1, ymd, 'returned', '销售退货 ' + o.order_no, o.id);
+      // 🔴 2026-11-04 提成归集：退货单必须带 placed_by（沿用**原单**经手人），
+      //    否则退货毛利没有归属 → 「减退货」算不到人头上。
+      const ri = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,return_of,placed_by,placed_by_role,placed_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rno, o.customer_id, o.customer_name, -o.total, -pay, o.discount != null ? o.discount : 1, ymd, 'returned', '销售退货 ' + o.order_no, o.id, o.placed_by != null ? o.placed_by : ctx.account.id, o.placed_by_role || '', o.placed_by_name || '');
       const rid = ri.lastInsertRowid;
       for (const it of items) {
         // 🔴🔴 2026-10-30 修：这里原来只插 11 列，**漏掉 discount / orig_price** →
@@ -2390,7 +2491,8 @@ async function handleApi(req, res, u) {
     const rno = genReturnNo(bookId);
     db.exec('BEGIN');
     try {
-      const ri = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,return_of) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rno, o.customer_id, o.customer_name, -total, -payable, discount, ymd, 'returned', '销售退货 ' + o.order_no, o.id);
+      // 🔴 同上：部分退货也要把毛利红冲归到原单经手人
+      const ri = db.prepare("INSERT INTO orders(book_id,order_no,customer_id,customer_name,total,payable,discount,order_date,status,remark,return_of,placed_by,placed_by_role,placed_by_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(bookId, rno, o.customer_id, o.customer_name, -total, -payable, discount, ymd, 'returned', '销售退货 ' + o.order_no, o.id, o.placed_by != null ? o.placed_by : ctx.account.id, o.placed_by_role || '', o.placed_by_name || '');
       const rid = ri.lastInsertRowid;
       for (const L of lines) {
         // 🔴 折扣/折前价统一取 resolveReturnPrice 的结果（快照优先 → 门店历史价 → 商品价）
@@ -2776,6 +2878,233 @@ async function handleApi(req, res, u) {
   }
 
   // GET /api/report/stores?from&to
+  // ================= 资金管理（2026-11-04，参考管家婆） =================
+  //  🔴 只查自己套账；金额恒正数，方向靠 direction 区分。
+  if (p === '/api/funds' && method === 'GET') {
+    if (!need('fund.view')) return;
+    const from = String(u.searchParams.get('from') || '').trim();
+    const to = String(u.searchParams.get('to') || '').trim();
+    const dir = String(u.searchParams.get('direction') || '').trim();
+    const where = ['book_id=?'], args = [bookId];
+    if (from) { where.push('date(fund_date)>=date(?)'); args.push(from); }
+    if (to) { where.push('date(fund_date)<=date(?)'); args.push(to); }
+    if (dir === 'in' || dir === 'out') { where.push('direction=?'); args.push(dir); }
+    const rows = db.prepare('SELECT * FROM fund_records WHERE ' + where.join(' AND ') + ' ORDER BY date(fund_date) DESC, id DESC LIMIT 500').all(...args);
+    const sum = db.prepare("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END),0) income, COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0) expense FROM fund_records WHERE " + where.join(' AND ')).get(...args);
+    return sendJSON(res, 200, {
+      rows, income: +(sum.income || 0).toFixed(2), expense: +(sum.expense || 0).toFixed(2),
+      net: +((sum.income || 0) - (sum.expense || 0)).toFixed(2)
+    });
+  }
+  if (p === '/api/funds' && method === 'POST') {
+    if (!need('fund.edit')) return;
+    const b = await getBody(req);
+    const d = String(b.fund_date || '').trim();
+    const dir = b.direction === 'in' ? 'in' : (b.direction === 'out' ? 'out' : '');
+    const amt = Number(b.amount);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !dir || !(amt > 0))
+      return sendJSON(res, 400, { error: '日期(YYYY-MM-DD)、收支方向、正数金额必填' });
+    // 🔴 离线重传幂等：带 client_fund_id 且库里已有 → 直接返回旧 id，绝不记第二笔
+    const cid = String(b.client_fund_id || '').trim();
+    if (cid) {
+      const ex = db.prepare('SELECT id FROM fund_records WHERE book_id=? AND client_fund_id=?').get(bookId, cid);
+      if (ex) return sendJSON(res, 200, { id: Number(ex.id), dedup: true });
+    }
+    const info = db.prepare("INSERT INTO fund_records(book_id,fund_date,direction,category,amount,account,counterparty,remark,placed_by,placed_by_name,client_fund_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .run(bookId, d, dir, String(b.category || '').trim(), +amt.toFixed(2),
+           String(b.account || '').trim(), String(b.counterparty || '').trim(), String(b.remark || '').trim(),
+           ctx.account.id, ctx.account.display_name || ctx.account.username || '', cid || null);
+    return sendJSON(res, 200, { id: Number(info.lastInsertRowid) });
+  }
+  m = p.match(/^\/api\/funds\/(\d+)$/);
+  if (m && (method === 'PUT' || method === 'DELETE')) {
+    if (!need('fund.edit')) return;
+    const row = db.prepare('SELECT * FROM fund_records WHERE id=? AND book_id=?').get(m[1], bookId);
+    if (!row) return sendJSON(res, 404, { error: '记录不存在' });
+    if (method === 'DELETE') {
+      db.prepare('DELETE FROM fund_records WHERE id=? AND book_id=?').run(m[1], bookId);
+      return sendJSON(res, 200, { ok: true });
+    }
+    const b = await getBody(req);
+    const d = String(b.fund_date || row.fund_date).trim();
+    const dir = b.direction === 'in' ? 'in' : (b.direction === 'out' ? 'out' : row.direction);
+    const amt = b.amount != null ? Number(b.amount) : row.amount;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !(amt > 0)) return sendJSON(res, 400, { error: '日期或金额不合法' });
+    db.prepare('UPDATE fund_records SET fund_date=?,direction=?,category=?,amount=?,account=?,counterparty=?,remark=? WHERE id=? AND book_id=?')
+      .run(d, dir, String(b.category != null ? b.category : row.category).trim(), +amt.toFixed(2),
+           String(b.account != null ? b.account : row.account).trim(),
+           String(b.counterparty != null ? b.counterparty : row.counterparty).trim(),
+           String(b.remark != null ? b.remark : row.remark).trim(), m[1], bookId);
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  // ================= 员工提成（2026-11-04） =================
+  //  口径：毛利 = Σ((price-cost)*qty)，退货单 qty 为负天然红冲；
+  //        提成 = 毛利 × 比例（默认 50%），比例由老板在设置里调。
+  //  🔴 订单级字段单独聚合，绝不 JOIN 明细后 SUM（JOIN 扇出铁律）。
+  const COMMISSION_RATE = () => {
+    const v = Number(getSetting(bookId, 'commission_rate', '0.5'));
+    return (isFinite(v) && v >= 0 && v <= 1) ? v : 0.5;
+  };
+  /** 全局模式：'profit' 利润分成（默认）| 'sales' 销售额提成 */
+  const COMMISSION_MODE = () => (getSetting(bookId, 'commission_mode', 'profit') === 'sales' ? 'sales' : 'profit');
+  /**
+   * 🔴 取「某员工」的提成规则：优先该员工专属规则，否则回落全局。
+   *    mode: profit → commission = 毛利 × rate
+   *          sales  → commission = 实收销售额 × rate
+   *    两种口径下退货单金额/毛利都是负数 → 天然红冲。
+   */
+  function commissionRuleOf(accId) {
+    const r = db.prepare('SELECT mode, rate FROM commission_rules WHERE book_id=? AND account_id=?').get(bookId, accId);
+    if (r) return { mode: (r.mode === 'sales' ? 'sales' : 'profit'), rate: (isFinite(r.rate) && r.rate >= 0 && r.rate <= 1) ? r.rate : 0.5, custom: true };
+    return { mode: COMMISSION_MODE(), rate: COMMISSION_RATE(), custom: false };
+  }
+  /** 按规则算提成：base 由调用方按 mode 传（利润模式传 grossProfit，销售额模式传 payable） */
+  function calcCommission(rule, baseProfit, baseSales) {
+    const base = rule.mode === 'sales' ? baseSales : baseProfit;
+    return +(base * rule.rate).toFixed(2);
+  }
+  function commissionRows(from, to, onlyMine) {
+    const w = ['o.book_id=?'], a = [bookId];
+    if (from) { w.push("date(COALESCE(o.order_date, substr(o.created_at,1,10)))>=date(?)"); a.push(from); }
+    if (to) { w.push("date(COALESCE(o.order_date, substr(o.created_at,1,10)))<=date(?)"); a.push(to); }
+    if (onlyMine) { w.push('o.placed_by=?'); a.push(ctx.account.id); }
+    const dayExpr = "date(COALESCE(o.order_date, substr(o.created_at,1,10)))";
+    // 明细级：毛利/数量按行算（JOIN 后每行恰好一次，无扇出）
+    const items = db.prepare(`SELECT o.id oid, ${dayExpr} d, o.placed_by, o.placed_by_name,
+        o.status, o.total, o.payable,
+        COALESCE(SUM((oi.price - COALESCE(oi.cost,0)) * oi.qty),0) gross_profit,
+        COALESCE(SUM(oi.qty),0) qty
+      FROM orders o LEFT JOIN order_items oi ON oi.order_id=o.id AND oi.book_id=o.book_id
+      WHERE ${w.join(' AND ')} GROUP BY o.id`).all(...a);
+    return items;
+  }
+  if (p === '/api/commission/config' && method === 'GET') {
+    if (!need('commission.view')) return;
+    // 老板/经理额外拿到「按员工」的规则列表（含全局兜底值）
+    const rules = canCtx(ctx, 'commission.edit')
+      ? db.prepare(`SELECT cr.account_id, cr.mode, cr.rate, a.display_name, a.username, a.role
+                    FROM commission_rules cr LEFT JOIN accounts a ON a.id=cr.account_id
+                    WHERE cr.book_id=? ORDER BY a.id`).all(bookId)
+      : [];
+    return sendJSON(res, 200, {
+      rate: COMMISSION_RATE(), mode: COMMISSION_MODE(),
+      canEdit: canCtx(ctx, 'commission.edit'),
+      rules: rules.map(r => ({ accountId: r.account_id, name: r.display_name || r.username || ('#' + r.account_id),
+        role: r.role, mode: r.mode, rate: r.rate }))
+    });
+  }
+  if (p === '/api/commission/config' && method === 'PUT') {
+    if (!canCtx(ctx, 'commission.edit')) return sendJSON(res, 403, { error: '只有老板/经理可以设置提成比例' });
+    const b = await getBody(req);
+    // 二选一：① 设全局（不带 account_id）② 设某员工（带 account_id）
+    const mode = (b.mode === 'sales') ? 'sales' : (b.mode === 'profit' ? 'profit' : null);
+    const v = b.rate != null ? Number(b.rate) : null;
+    if (v != null && (!isFinite(v) || v < 0 || v > 1)) return sendJSON(res, 400, { error: '比例需在 0~1 之间（0.5=50%）' });
+    if (b.account_id) {
+      // 🔴 按员工设：只能设本套账的账户；rate=null 表示删除该员工专属规则（回落全局）
+      const acc = db.prepare('SELECT id FROM accounts WHERE id=? AND book_id=?').get(b.account_id, bookId);
+      if (!acc) return sendJSON(res, 404, { error: '账户不存在或不属于本套账' });
+      if (v == null && mode == null) {
+        db.prepare('DELETE FROM commission_rules WHERE book_id=? AND account_id=?').run(bookId, b.account_id);
+        return sendJSON(res, 200, { ok: true, deleted: Number(b.account_id) });
+      }
+      const cur = db.prepare('SELECT mode, rate FROM commission_rules WHERE book_id=? AND account_id=?').get(bookId, b.account_id);
+      const nm = mode != null ? mode : (cur ? cur.mode : COMMISSION_MODE());
+      const nr = v != null ? v : (cur ? cur.rate : COMMISSION_RATE());
+      db.prepare(`INSERT INTO commission_rules(book_id,account_id,mode,rate,updated_at)
+                  VALUES(?,?,?,?,datetime('now','localtime'))
+                  ON CONFLICT(book_id,account_id) DO UPDATE SET mode=excluded.mode, rate=excluded.rate, updated_at=excluded.updated_at`)
+        .run(bookId, b.account_id, nm, nr);
+      return sendJSON(res, 200, { ok: true, accountId: Number(b.account_id), mode: nm, rate: nr });
+    }
+    if (v != null) setSetting(bookId, 'commission_rate', String(v));
+    if (mode != null) setSetting(bookId, 'commission_mode', mode);
+    return sendJSON(res, 200, { ok: true, rate: COMMISSION_RATE(), mode: COMMISSION_MODE() });
+  }
+  if (p === '/api/commission/mine' && method === 'GET') {
+    // 🔴 经理要求「员工能看到自己每天大概能提成多少」→ 本接口对**所有非客户角色**开放，
+    //    不查 commission.view（那是「看全员/配置」的权限）。
+    //    数据层 commissionRows(..., true) 强制 placed_by=当前账号，天然隔离，
+    //    员工再怎么改 URL 也看不到别人的提成 → 无需额外权限门槛。
+    if (isCustomer(ctx)) return sendJSON(res, 403, { error: '客户账号无提成视图' });
+    const from = String(u.searchParams.get('from') || '').trim();
+    const to = String(u.searchParams.get('to') || '').trim();
+    const rule = commissionRuleOf(ctx.account.id);
+    const rate = rule.rate;
+    const rows = commissionRows(from, to, true);
+    // 🔴 每单明细：员工能逐单看到「这单我能提多少」（只读，任何写接口都不对员工开放）
+    const orders = rows.map(r => {
+      const isRet = r.status === 'returned' || Number(r.total || 0) < 0;
+      const sales = (r.payable != null ? r.payable : r.total) || 0;
+      return {
+        id: r.oid, date: r.d || '', order_no: r.order_no || '', customer: r.customer_name || '',
+        sales: +sales.toFixed(2), returns: isRet ? +sales.toFixed(2) : 0,
+        grossProfit: +r.gross_profit.toFixed(2),
+        commission: calcCommission(rule, r.gross_profit, sales),
+        isReturn: isRet, status: r.status || ''
+      };
+    }).sort((a, b) => (b.date + String(b.id)).localeCompare(a.date + String(a.id)));
+    const byDay = new Map();
+    for (const r of rows) {
+      const k = r.d || '未知日期';
+      if (!byDay.has(k)) byDay.set(k, { date: k, sales: 0, returns: 0, grossProfit: 0, commission: 0, orders: 0, returnOrders: 0, salesBase: 0 });
+      const g = byDay.get(k);
+      g.grossProfit += r.gross_profit;
+      // 🔴 退货红冲：status='returned' 或 total<0 都算退货（与前端判据一致）
+      const isRet = r.status === 'returned' || Number(r.total || 0) < 0;
+      const sales0 = (r.payable != null ? r.payable : r.total) || 0;
+      if (isRet) { g.returns += sales0; g.returnOrders++; }
+      else { g.sales += sales0; g.orders++; }
+      g.salesBase += sales0;   // 销售额模式用（含退货负值）
+    }
+    const days = Array.from(byDay.values()).sort((x, y) => y.date.localeCompare(x.date)).map(g => ({
+      date: g.date,
+      sales: +g.sales.toFixed(2), returns: +g.returns.toFixed(2),
+      grossProfit: +g.grossProfit.toFixed(2),
+      commission: calcCommission(rule, g.grossProfit, g.salesBase),
+      orders: g.orders, returnOrders: g.returnOrders
+    }));
+    const tot = days.reduce((s, d) => ({ sales: s.sales + d.sales, returns: s.returns + d.returns,
+      grossProfit: s.grossProfit + d.grossProfit, commission: s.commission + d.commission }),
+      { sales: 0, returns: 0, grossProfit: 0, commission: 0 });
+    return sendJSON(res, 200, { rate, mode: rule.mode, custom: rule.custom, days, orders, total: {
+      sales: +tot.sales.toFixed(2), returns: +tot.returns.toFixed(2),
+      grossProfit: +tot.grossProfit.toFixed(2), commission: +tot.commission.toFixed(2)
+    } });
+  }
+  if (p === '/api/commission/all' && method === 'GET') {
+    if (!canCtx(ctx, 'commission.edit')) return sendJSON(res, 403, { error: '只有老板/经理可以查看全员提成' });
+    const from = String(u.searchParams.get('from') || '').trim();
+    const to = String(u.searchParams.get('to') || '').trim();
+    const rows = commissionRows(from, to, false);
+    const byWho = new Map();
+    for (const r of rows) {
+      const k = r.placed_by != null ? String(r.placed_by) : 'unassigned';
+      if (!byWho.has(k)) byWho.set(k, { id: r.placed_by, name: r.placed_by_name || '未指定经手人',
+        sales: 0, returns: 0, grossProfit: 0, commission: 0, orders: 0, returnOrders: 0, salesBase: 0 });
+      const g = byWho.get(k);
+      g.grossProfit += r.gross_profit;
+      const isRet = r.status === 'returned' || Number(r.total || 0) < 0;
+      const sales0 = (r.payable != null ? r.payable : r.total) || 0;
+      if (isRet) { g.returns += sales0; g.returnOrders++; }
+      else { g.sales += sales0; g.orders++; }
+      g.salesBase += sales0;
+    }
+    const people = Array.from(byWho.values()).map(g => {
+      // 🔴 每个人按**自己**的规则算（没单独设 → 回落全局）
+      const rule = g.id != null ? commissionRuleOf(g.id) : { mode: COMMISSION_MODE(), rate: COMMISSION_RATE(), custom: false };
+      return {
+        id: g.id, name: g.name, sales: +g.sales.toFixed(2), returns: +g.returns.toFixed(2),
+        grossProfit: +g.grossProfit.toFixed(2),
+        commission: calcCommission(rule, g.grossProfit, g.salesBase),
+        mode: rule.mode, rate: rule.rate, custom: rule.custom,
+        orders: g.orders, returnOrders: g.returnOrders
+      };
+    }).sort((a, b) => b.commission - a.commission);
+    return sendJSON(res, 200, { rate: COMMISSION_RATE(), mode: COMMISSION_MODE(), people });
+  }
+
   if (p === '/api/report/stores' && method === 'GET') {
     if (!need('analysis.view')) return;
     const from = u.searchParams.get('from') || '', to = u.searchParams.get('to') || '';
@@ -3176,7 +3505,7 @@ async function handleApi(req, res, u) {
     });
   }
   if (p === '/api/settings' && method === 'PUT') {
-    if (!can(role, 'settings.edit')) return sendJSON(res, 403, { error: '只有老板可以修改设置' });
+    if (!canCtx(ctx, 'settings.edit')) return sendJSON(res, 403, { error: '只有老板可以修改设置' });
     const b = await getBody(req);
     if (b.shop_name != null) {
       const n = String(b.shop_name).trim();
@@ -3353,6 +3682,7 @@ async function handleApi(req, res, u) {
 
 // 对外暴露的账户/套账字段（不含密码）
 function pubAcc(a) { return { id: a.id, username: a.username, display_name: a.display_name, role: a.role, roleLabel: roleLabel(a.role), book_id: a.book_id, active: a.active, is_admin: !!a.is_admin, whitelisted: !!a.whitelisted, banned_reason: a.banned_reason || null, banned_at: a.banned_at || null, created_at: a.created_at, customer_id: a.customer_id ? Number(a.customer_id) : null,
+    perms: a.perms || null,
     // 2026-10-19 多门店：客户端（手机版）拿它渲染门店切换器
     customer_ids: a.role === 'customer' ? custStoreIdsOf(a, a.book_id) : [] }; }
 function pubBook(b) { return b ? { id: b.id, name: b.name } : null; }

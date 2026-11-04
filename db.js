@@ -474,6 +474,49 @@ try {
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_id ON orders(client_order_id) WHERE client_order_id IS NOT NULL AND client_order_id <> ''");
   } catch (e) { console.error('migrate idx_orders_client_id:', e.message); }
   ['customers', 'products', 'inventory', 'orders', 'order_items', 'price_systems', 'deliveries', 'delivery_items', 'customer_prices', 'customer_discounts'].forEach(t => ensureColumn(t, 'book_id', 'book_id INTEGER DEFAULT 1'));
+  // 🔴 2026-11-04 账户级权限：NULL / 空串 = 沿用角色默认 ROLES[role].perms（向后兼容，
+  //    老库不用迁移、老账号行为不变）。非空 = 该账户**独立**的 perms 白名单（JSON 数组）。
+  //    为什么必须账户级：权限挂在角色上时，老板在 A 账户里「改员工权限」会改到共享角色定义，
+  //    切到 B 账户看到的也跟着变 —— 正是本次报障的现象。
+  ensureColumn('accounts', 'perms', 'perms TEXT');
+  // ---------- 资金流水（2026-11-04，参考管家婆「资金管理」）----------
+  //   只记「生意上的钱进钱出」，不碰应收应付核销（payments 表管挂账）。
+  //   direction: 'in' 收入 / 'out' 支出；amount 恒为正数。
+  db.exec(`CREATE TABLE IF NOT EXISTS fund_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER DEFAULT 1,
+    fund_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    amount REAL DEFAULT 0,
+    account TEXT DEFAULT '',
+    counterparty TEXT DEFAULT '',
+    remark TEXT DEFAULT '',
+    placed_by INTEGER,
+    placed_by_name TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+  )`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_fund_date ON fund_records(book_id, fund_date)");
+  // 🔴 离线记账幂等（2026-11-04）：客户端生成 client_fund_id 随记录提交，
+  //    断网重传时靠它去重 —— 否则一笔账被记两次。
+  //    ⚠️ SQLite 的 ALTER TABLE ADD COLUMN 不接受 UNIQUE → 普通列 + 部分唯一索引
+  //       （老记录 client_fund_id 为 NULL/空串，互不影响）。
+  ensureColumn('fund_records', 'client_fund_id', 'client_fund_id TEXT');
+  // ---------- 提成规则（2026-11-04）：按员工单独设比例与模式 ----------
+  //   没有为某员工建规则时 → 回落全局 settings.commission_rate / commission_mode。
+  //   mode: 'profit' 利润分成（毛利×比例，默认） | 'sales' 销售额提成（实收×比例）
+  db.exec(`CREATE TABLE IF NOT EXISTS commission_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'profit',
+    rate REAL NOT NULL DEFAULT 0.5,
+    updated_at TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE(book_id, account_id)
+  )`);
+  try {
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_fund_client_id ON fund_records(client_fund_id) WHERE client_fund_id IS NOT NULL AND client_fund_id <> ''");
+  } catch (e) { console.error('migrate idx_fund_client_id:', e.message); }
 } catch (e) { console.error('migrate:', e.message); }
 
 // 🔴🔴 2026-10-19 客户下单员多门店：把老的单门店绑定回填进 account_stores。
@@ -519,39 +562,33 @@ function seed() {
     db.prepare('UPDATE delivery_items SET book_id=1 WHERE book_id IS NULL').run();
   }
 
-  // 2) 首次初始化的管理员账户
-  //    ⚠️ 开源版为了开箱即用提供默认账号 admin / admin123，
-  //       但**它写在公开源码里，任何人都知道**。部署到公网前必须：
-  //       ① 用 ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD 指定你自己的账号，或
-  //       ② 启动后立刻在「设置」里改掉默认密码。
-  //       启动时若检测到仍是默认密码，会打印醒目告警（见下）。
-  const DEFAULT_BOSS_USER = 'admin';
-  const DEFAULT_BOSS_PASS = 'admin123';
-  const bossUser = (process.env.ERP_BOSS_USERNAME || '').trim() || DEFAULT_BOSS_USER;
-  const bossPass = (process.env.ERP_BOSS_PASSWORD || '').trim() || DEFAULT_BOSS_PASS;
-  const usingDefault = !process.env.ERP_BOSS_USERNAME || !process.env.ERP_BOSS_PASSWORD;
-  const boss = db.prepare('SELECT * FROM accounts WHERE username=?').get(bossUser);
-  if (!boss) {
-    const info = db.prepare('INSERT INTO accounts(username,password,display_name,role,book_id,active) VALUES(?,?,?,?,?,1)')
-      .run(bossUser, hashPassword(bossPass), '管理员', 'boss', 1);
-    const aid = info.lastInsertRowid;
-    db.prepare('UPDATE books SET owner_account_id=? WHERE id=1').run(aid);
-    db.prepare('INSERT OR IGNORE INTO account_books(account_id,book_id) VALUES(?,1)').run(aid);
-    console.log('已创建管理员账户: ' + bossUser + ' / ' + bossPass);
-    if (usingDefault) {
-      console.log('\n' + '='.repeat(64));
-      console.log('⚠️  安全告警：当前使用源码内置的默认账号密码（admin / admin123）。');
-      console.log('   这是公开在 GitHub 上的默认凭据，任何人都用它登录你的系统。');
-      console.log('   请立即：设置环境变量 ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD 后重启，');
-      console.log('   或登录后到「设置」页修改密码。');
-      console.log('='.repeat(64) + '\n');
+  // 2) 老板账户（示例套账）
+  //    🔴 凭据从环境变量读，代码里不落明文。
+  //    ERP_BOSS_USERNAME / ERP_BOSS_PASSWORD 由部署时的 .env 提供
+  //    （systemd EnvironmentFile，见 deploy-systemd.sh）。
+  //    🔴 未配置时**只跳过创建**，绝不写入占位账号 —— 已存在的库不受影响。
+  const bossUser = (process.env.ERP_BOSS_USERNAME || '').trim();
+  const bossPass = process.env.ERP_BOSS_PASSWORD || '';
+  if (bossUser && bossPass) {
+    const boss = db.prepare('SELECT * FROM accounts WHERE username=?').get(bossUser);
+    if (!boss) {
+      const info = db.prepare('INSERT INTO accounts(username,password,display_name,role,book_id,active) VALUES(?,?,?,?,?,1)')
+        .run(bossUser, hashPassword(bossPass), '老板', 'boss', 1);
+      const aid = info.lastInsertRowid;
+      db.prepare('UPDATE books SET owner_account_id=? WHERE id=1').run(aid);
+      db.prepare('INSERT OR IGNORE INTO account_books(account_id,book_id) VALUES(?,1)').run(aid);
+      console.log('已创建示例套账老板账户: ' + bossUser);
     }
+  } else {
+    console.log('[seed] 未配置 ERP_BOSS_USERNAME/ERP_BOSS_PASSWORD → 跳过创建老板账户（已有库不受影响）');
   }
 
-  // 2.1) 平台管理员：默认即老板账号。
+  // 2.1) 平台管理员：唯一管理员 = 老板账号。
   // 与「套账老板」解耦 —— is_admin=1 才能看全平台用户 / 违规记录 / 执行封禁。
-  // 用环境变量 ERP_ADMIN_ACCOUNTS 覆盖（逗号分隔），默认只有这一个。
-  const adminList = (process.env.ERP_ADMIN_ACCOUNTS || 'admin').split(',').map(s => s.trim()).filter(Boolean);
+  // 用环境变量 ERP_ADMIN_ACCOUNTS 覆盖（逗号分隔）；未配置时默认老板账号。
+  // 🔴 is_admin 是**持久化字段**，本段只做「置 1」不做「清 0」→ 已有标记永不丢失。
+  const adminList = (process.env.ERP_ADMIN_ACCOUNTS || bossUser || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
   for (const u of adminList) {
     const r = db.prepare('UPDATE accounts SET is_admin=1 WHERE username=?').run(u);
     if (r.changes === 0) console.log('[moderation] 管理员账号不存在，跳过标记: ' + u);

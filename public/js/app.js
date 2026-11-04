@@ -558,7 +558,11 @@ if (d.trust_full) {
   function applyPerms() {
     $$('.sidebar nav button').forEach(b => {
       const pg = b.dataset.page;
+      // 🔴 收纳后的页面不再单独占侧栏按钮（DOM 保留供 navigate 用，但一律隐藏）
+      if (b.dataset.folded === '1') { b.classList.add('hidden'); return; }
       let show = true;
+      if (pg === 'functions') show = (ME.role !== 'customer');   // 客户不进功能中心
+      if (pg === 'funds' || pg === 'commission') show = false;
       if (pg === 'me' && !can('settings.edit')) show = false;         // 设置页仅老板
       if (pg === 'orders' && !can('order.view')) show = false;
       if (pg === 'customers' && !can('customer.view')) show = false;
@@ -577,7 +581,11 @@ if (d.trust_full) {
     });
   }
 
+  // 🔴 v5.7.12 经理反馈：抽屉对网页版太小 → 「功能」改为**主区域直接展示宫格**（与移动端一致）
+  function bindFuncDrawer() { /* 原抽屉绑定已废弃；「功能」走 navigate('functions') */ }
+
   async function boot() {
+    bindFuncDrawer();
     TOKEN = localStorage.getItem('erp_token');
     // v5.5：即便是普通token 登录，也走「停在首页选账套」的流程，
     // 不再自动进系统。经理要的是：首页永远是选择页。
@@ -599,8 +607,11 @@ if (d.trust_full) {
   async function navigate(page) {
     CURRENT = page;
     $$('.sidebar nav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+    // 🔴 v5.7.12 布局优化：按页面打 class，宽屏下限宽，避免卡片拉满整屏留大片空白
+    $('#page').className = 'page-' + page;
     $('#page').innerHTML = '<div class="muted" style="padding:20px;text-align:center">加载中…</div>';
     try {
+      if (page === 'functions') { renderFunctions(); return; }
       if (page === 'sale') await renderSale();
       else if (page === 'myar') await renderMyAr();
       else if (page === 'orders') await renderOrders();
@@ -608,6 +619,8 @@ if (d.trust_full) {
       else if (page === 'products') await renderProducts();
       else if (page === 'analytics') await renderAnalytics();
       else if (page === 'purchase') await renderPurchase();
+      else if (page === 'funds') await renderFunds();
+      else if (page === 'commission') await renderCommission();
       else if (page === 'admin') await renderAdmin();
       else if (page === 'me') await renderMe();
     } catch (e) { $('#page').innerHTML = '<div class="err" style="padding:20px">' + esc(e.message) + '</div>'; }
@@ -713,6 +726,194 @@ if (d.trust_full) {
   ];
   // 采购单草稿（新建采购单用）
   let PUR_DRAFT = { supplier_id: '', supplier_name: '', lines: [], remark: '' };
+
+  // 🔴 按员工设提成规则（经理确认：可按销售金额提成，也可利润分成；未设回落全局）
+  function editCommissionRule(accId, name, cfg, reload) {
+    const cur = (cfg.rules || []).find(r => String(r.accountId) === String(accId));
+    showModal('提成规则 · ' + name, `
+      <label>计提方式</label>
+      <select id="cr-mode">
+        <option value="profit" ${!cur || cur.mode === 'profit' ? 'selected' : ''}>利润分成（毛利×比例）</option>
+        <option value="sales" ${cur && cur.mode === 'sales' ? 'selected' : ''}>销售额提成（实收×比例）</option>
+      </select>
+      <label style="margin-top:10px">提成比例（%）</label>
+      <input id="cr-rate" type="number" step="1" min="0" max="100" value="${cur ? Math.round(cur.rate * 100) : Math.round(cfg.rate * 100)}"/>
+      <div class="muted" style="font-size:12px;margin-top:8px">全局：${cfg.mode === 'sales' ? '销售额提成' : '利润分成'} ${Math.round(cfg.rate * 100)}%（未单独设置的员工按此计算）</div>
+      <div class="row" style="gap:8px;margin-top:14px">
+        <button class="btn-primary" id="cr-save" style="flex:1">保存该员工规则</button>
+        ${cur ? '<button class="btn-sm danger" id="cr-del">删除专属（回落全局）</button>' : ''}
+      </div>`);
+    $('#cr-save').onclick = async () => {
+      try {
+        await API.req('PUT', '/api/commission/config', {
+          account_id: Number(accId), mode: $('#cr-mode').value, rate: Number($('#cr-rate').value) / 100
+        });
+        closeModal(); toast('已保存 ' + name + ' 的提成规则'); reload();
+      } catch (e) { toast(e.message); }
+    };
+    const del = $('#cr-del');
+    if (del) del.onclick = async () => {
+      if (!confirm('删除 ' + name + ' 的专属规则？之后按全局规则计算。')) return;
+      try { await API.req('PUT', '/api/commission/config', { account_id: Number(accId) }); closeModal(); toast('已删除专属规则'); reload(); } catch (e) { toast(e.message); }
+    };
+  }
+
+  // ================= 功能抽屉（2026-11-04，参考管家婆宫格） =================
+  //  🔴 卡片权限与服务端 need() 逐字一致；「我的提成」对员工开放不查 perm
+  //     （服务端 /api/commission/mine 强制锁 placed_by=自己，天然隔离）。
+  const FUNC_GROUPS = [
+    { group: '进销存', items: [
+      { page: 'purchase', icon: '🚚', label: '采购与库存', perms: ['purchase.view', 'inventory.view'] },
+      { page: 'products', icon: '📦', label: '商品管理', perms: ['product.view'] },
+      { page: 'customers', icon: '🏪', label: '客户管理', perms: ['customer.view'] }
+    ]},
+    { group: '报表与经营', items: [
+      { page: 'analytics', icon: '📊', label: '经营报表', perms: ['analysis.view'] },
+      { page: 'commission', icon: '🏅', label: '员工提成', perms: [] }
+    ]},
+    { group: '资金', items: [
+      { page: 'funds', icon: '💵', label: '资金流水', perms: ['fund.view'] }
+    ]},
+    { group: '其他', items: [
+      { page: 'myar', icon: '🧾', label: '我的欠款', perms: [], customerOnly: true },
+      { page: 'admin', icon: '🛡️', label: '平台管理', perms: [], adminOnly: true }
+    ]}
+  ];
+  // 🔴 功能中心页面：主区域大宫格（2026-11-04，经理定稿：不用抽屉）
+  function renderFunctions() {
+    let html = '', any = 0;
+    for (const g of FUNC_GROUPS) {
+      const cards = g.items.filter(it => {
+        if (it.customerOnly) return ME.role === 'customer';
+        if (it.adminOnly) return !!ME.isAdmin;
+        if (ME.role === 'customer') return false;
+        if (!it.perms.length) return true;                 // 无门槛（我的提成）
+        return it.perms.some(p => can(p));
+      }).map(it => `<button class="func-card" data-fpage="${it.page}"><span class="fc-ico">${it.icon}</span><span class="fc-t">${esc(it.label)}</span></button>`);
+      if (!cards.length) continue;
+      any += cards.length;
+      html += `<div class="func-sec"><div class="func-sec-t">${esc(g.group)}</div><div class="func-cards">${cards.join('')}</div></div>`;
+    }
+    $('#page').innerHTML = any
+      ? `<div class="func-page"><h3 style="margin:4px 0 14px">🧰 全部功能</h3>${html}
+         <div class="muted" style="font-size:12px;margin-top:16px">按当前账户权限显示 · 权限由老板在「设置 → 账户与角色」配置</div></div>`
+      : '<div class="card muted" style="padding:16px">当前账户暂无可用功能</div>';
+    $$('#page [data-fpage]').forEach(b => b.onclick = () => navigate(b.dataset.fpage));
+  }
+
+  // ================= 资金管理（2026-11-04） =================
+  function fundMonthRange() {
+    const d = new Date(), y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0');
+    return { from: y + '-' + m + '-01', to: y + '-' + m + '-31' };
+  }
+  async function renderFunds() {
+    if (!can('fund.view')) { $('#page').innerHTML = '<div class="card muted" style="padding:16px">无权限查看资金流水</div>'; return; }
+    const r = fundMonthRange();
+    $('#page').innerHTML = `
+      <div class="card"><div class="row between"><h3 style="margin:0">💵 资金流水</h3>
+        <div><input type="date" id="fd-from" value="${r.from}" style="width:140px"/> ~ <input type="date" id="fd-to" value="${r.to}" style="width:140px"/>
+        <button class="btn-sm" id="fd-refresh">查询</button></div></div>
+        <div class="fund-sum" id="fd-sum"></div></div>
+      ${can('fund.edit') ? `<div class="card"><h4 style="margin:0 0 8px">记一笔</h4>
+        <div class="fund-form">
+          <input type="date" id="fd-date" value="${todayISO()}"/>
+          <select id="fd-dir"><option value="out">支出</option><option value="in">收入</option></select>
+          <select id="fd-cat"><option>货款</option><option>进货</option><option>运费</option><option>工资</option><option>房租</option><option>水电</option><option>其他</option></select>
+          <input id="fd-amt" type="number" step="0.01" placeholder="金额"/>
+          <input id="fd-acct" placeholder="账户（现金/银行卡）"/>
+          <input id="fd-party" placeholder="往来单位"/>
+          <input id="fd-remark" placeholder="备注"/>
+          <button class="btn-primary" id="fd-add">保存</button>
+        </div></div>` : ''}
+      <div class="card"><div id="fd-list"></div></div>`;
+    const load = async () => {
+      const q = '?from=' + $('#fd-from').value + '&to=' + $('#fd-to').value;
+      try {
+        const d = await API.req('GET', '/api/funds' + q);
+        $('#fd-sum').innerHTML = `<div class="fund-kpi"><span>收入</span><b class="up">${fmt(d.income)}</b></div>
+          <div class="fund-kpi"><span>支出</span><b class="down">${fmt(d.expense)}</b></div>
+          <div class="fund-kpi"><span>净额</span><b>${fmt(d.net)}</b></div>`;
+        $('#fd-list').innerHTML = d.rows.length ? `<table class="tbl"><thead><tr><th>日期</th><th>方向</th><th>类别</th><th>金额</th><th>账户</th><th>往来单位</th><th>备注</th><th>经手人</th>${can('fund.edit') ? '<th></th>' : ''}</tr></thead><tbody>` +
+          d.rows.map(x => `<tr><td>${esc(x.fund_date)}</td><td>${x.direction === 'in' ? '<span class="up">收入</span>' : '<span class="down">支出</span>'}</td><td>${esc(x.category || '')}</td><td>${fmt(x.amount)}</td><td>${esc(x.account || '')}</td><td>${esc(x.counterparty || '')}</td><td>${esc(x.remark || '')}</td><td>${esc(x.placed_by_name || '')}</td>${can('fund.edit') ? `<td><button class="btn-sm danger" data-fdel="${x.id}">删</button></td>` : ''}</tr>`).join('') + '</tbody></table>'
+          : '<div class="muted" style="padding:14px;text-align:center">本月暂无流水</div>';
+        $$('[data-fdel]').forEach(b => b.onclick = async () => {
+          if (!confirm('删除这条资金记录？')) return;
+          try { await API.req('DELETE', '/api/funds/' + b.dataset.fdel); toast('已删除'); load(); } catch (e) { toast(e.message); }
+        });
+      } catch (e) { $('#fd-list').innerHTML = '<div class="err" style="padding:14px">' + esc(e.message) + '</div>'; }
+    };
+    $('#fd-refresh').onclick = load;
+    if ($('#fd-add')) $('#fd-add').onclick = async () => {
+      const body = {
+        fund_date: $('#fd-date').value, direction: $('#fd-dir').value, category: $('#fd-cat').value,
+        amount: Number($('#fd-amt').value), account: $('#fd-acct').value,
+        counterparty: $('#fd-party').value, remark: $('#fd-remark').value
+      };
+      try { await API.req('POST', '/api/funds', body); toast('已记录'); $('#fd-amt').value = ''; $('#fd-remark').value = ''; load(); }
+      catch (e) { toast(e.message); }
+    };
+    await load();
+  }
+
+  // ================= 员工提成（2026-11-04） =================
+  async function renderCommission() {
+    if (ME.role === 'customer') { $('#page').innerHTML = '<div class="card muted" style="padding:16px">客户账号无提成视图</div>'; return; }
+    const r = fundMonthRange();
+    const canAll = can('commission.edit');
+    $('#page').innerHTML = `
+      <div class="card"><div class="row between"><h3 style="margin:0">🏅 ${canAll ? '员工提成' : '我的提成'}</h3>
+        <div><input type="date" id="cm-from" value="${r.from}" style="width:140px"/> ~ <input type="date" id="cm-to" value="${r.to}" style="width:140px"/>
+        <button class="btn-sm" id="cm-refresh">查询</button></div></div>
+        <div class="muted" style="margin-top:6px">口径：毛利 × 比例（默认 50%）；退货单毛利为负，自动红冲；按开单经手人归集。</div>
+        <div class="cm-rate" id="cm-rate"></div></div>
+      <div class="card"><div id="cm-body"></div></div>`;
+    const load = async () => {
+      const q = '?from=' + $('#cm-from').value + '&to=' + $('#cm-to').value;
+      try {
+        if (canAll) {
+          const [cfg, d] = await Promise.all([API.req('GET', '/api/commission/config'), API.req('GET', '/api/commission/all' + q)]);
+          const modeName = (m) => m === 'sales' ? '销售额提成' : '利润分成';
+          // 🔴 经理确认口径：模式可切（利润分成/销售额提成）+ 可按员工单独设（未设回落全局）
+          $('#cm-rate').innerHTML = `
+            <span>全局模式</span>
+            <select id="cm-mode"><option value="profit" ${d.mode === 'profit' ? 'selected' : ''}>利润分成（毛利×比例）</option><option value="sales" ${d.mode === 'sales' ? 'selected' : ''}>销售额提成（实收×比例）</option></select>
+            <span>全局比例</span><input id="cm-newrate" type="number" step="1" min="0" max="100" value="${Math.round(d.rate * 100)}" style="width:80px"/> %
+            <button class="btn-sm" id="cm-saverate">保存全局</button>
+            <span class="muted">点「设规则」可给单个员工单独设（未设置的员工按全局算）</span>`;
+          $('#cm-saverate').onclick = async () => {
+            const v = Number($('#cm-newrate').value) / 100;
+            try { await API.req('PUT', '/api/commission/config', { rate: v, mode: $('#cm-mode').value }); toast('全局规则已保存'); load(); } catch (e) { toast(e.message); }
+          };
+          $('#cm-body').innerHTML = d.people.length ? `<table class="tbl"><thead><tr><th>员工</th><th>模式</th><th>比例</th><th>销售额</th><th>退货额</th><th>毛利</th><th>提成</th><th>单数</th><th></th></tr></thead><tbody>` +
+            d.people.map(p => `<tr><td>${esc(p.name)}</td>
+              <td>${modeName(p.mode)}${p.custom ? '<i class="muted" style="font-style:normal">（专属）</i>' : ''}</td>
+              <td>${Math.round(p.rate * 100)}%</td>
+              <td>${fmt(p.sales)}</td><td>${fmt(p.returns)}</td><td>${fmt(p.grossProfit)}</td><td><b class="up">${fmt(p.commission)}</b></td><td>${p.orders}(退${p.returnOrders})</td>
+              <td>${p.id != null ? `<button class="btn-sm gray" data-cmrule="${p.id}" data-cmname="${esc(p.name)}">设规则</button>` : ''}</td></tr>`).join('') + '</tbody></table>'
+            : '<div class="muted" style="padding:14px;text-align:center">本期暂无数据</div>';
+          $$('#cm-body [data-cmrule]').forEach(b => b.onclick = () => editCommissionRule(b.dataset.cmrule, b.dataset.cmname, cfg, load));
+        } else {
+          const d = await API.req('GET', '/api/commission/mine' + q);
+          const modeName = d.mode === 'sales' ? '销售额提成（实收×比例）' : '利润分成（毛利×比例）';
+          $('#cm-rate').innerHTML = `<span>计提方式 <b>${modeName}</b></span><span>比例 <b>${Math.round(d.rate * 100)}%</b></span>
+            <span class="cm-big">本期预计提成 <b>${fmt(d.total.commission)}</b></span>`;
+          const t = d.total;
+          $('#cm-body').innerHTML = `<div class="cm-kpis">
+              <div><span>销售额</span><b>${fmt(t.sales)}</b></div><div><span>退货额</span><b>${fmt(t.returns)}</b></div>
+              <div><span>毛利</span><b>${fmt(t.grossProfit)}</b></div><div><span>预计提成</span><b class="up">${fmt(t.commission)}</b></div></div>` +
+            (d.days.length ? `<table class="tbl" style="margin-top:12px"><thead><tr><th>日期</th><th>销售额</th><th>退货额</th><th>毛利</th><th>当日提成</th><th>单数</th></tr></thead><tbody>` +
+              d.days.map(x => `<tr><td>${esc(x.date)}</td><td>${fmt(x.sales)}</td><td>${fmt(x.returns)}</td><td>${fmt(x.grossProfit)}</td><td><b class="up">${fmt(x.commission)}</b></td><td>${x.orders}(退${x.returnOrders})</td></tr>`).join('') + '</tbody></table>'
+              : '<div class="muted" style="padding:14px;text-align:center">本期暂无数据</div>')
+            + `<div class="section-title" style="margin-top:18px">每单明细（只读，系统按规则自动计算）</div>` +
+            (d.orders && d.orders.length ? `<table class="tbl"><thead><tr><th>日期</th><th>单号</th><th>客户</th><th>金额</th><th>毛利</th><th>本单提成</th></tr></thead><tbody>` +
+              d.orders.map(o => `<tr${o.isReturn ? ' style="opacity:.65"' : ''}><td>${esc(o.date)}</td><td>${esc(o.order_no)}${o.isReturn ? ' <span class="down">退货</span>' : ''}</td><td>${esc(o.customer)}</td><td>${fmt(o.sales)}</td><td>${fmt(o.grossProfit)}</td><td><b class="${o.isReturn ? 'down' : 'up'}">${fmt(o.commission)}</b></td></tr>`).join('') + '</tbody></table>'
+              : '<div class="muted" style="padding:10px;text-align:center">本期暂无单据</div>');
+        }
+      } catch (e) { $('#cm-body').innerHTML = '<div class="err" style="padding:14px">' + esc(e.message) + '</div>'; }
+    };
+    $('#cm-refresh').onclick = load;
+    await load();
+  }
 
   async function renderPurchase() {
     if (!can('purchase.view') && !can('inventory.view')) {
@@ -4699,16 +4900,20 @@ if (d.trust_full) {
   async function renderMe() {    const s = await API.req('GET', '/api/stats');
     const isBoss = ME.role === 'boss';
     $('#page').innerHTML = `
-      <div class="card"><div class="section-title">账号信息</div>
-        <div class="row between"><span class="muted">账号</span><span>${esc(ME.account ? ME.account.username : '')}</span></div>
-        <div class="row between" style="margin-top:6px"><span class="muted">姓名</span><span>${esc(ME.account ? (ME.account.display_name || '') : '')}</span></div>
-        <div class="row between" style="margin-top:6px"><span class="muted">角色</span><span style="font-weight:700">${esc(ME.roleLabel || '')}</span></div>
-        <div class="row between" style="margin-top:6px"><span class="muted">当前套账</span><span>${esc(ME.book ? ME.book.name : '')}</span></div>
+      <div class="me-top">
+        <div class="card" style="margin-bottom:0"><div class="section-title">账号信息</div>
+          <div class="row between"><span class="muted">账号</span><span>${esc(ME.account ? ME.account.username : '')}</span></div>
+          <div class="row between" style="margin-top:6px"><span class="muted">姓名</span><span>${esc(ME.account ? (ME.account.display_name || '') : '')}</span></div>
+          <div class="row between" style="margin-top:6px"><span class="muted">角色</span><span style="font-weight:700">${esc(ME.roleLabel || '')}</span></div>
+          <div class="row between" style="margin-top:6px"><span class="muted">当前套账</span><span>${esc(ME.book ? ME.book.name : '')}</span></div>
+        </div>
+        <div class="card" style="margin-bottom:0"><div class="section-title">今日概览</div>
+          <div class="row between"><span class="muted">销售额</span><span style="font-weight:700;color:var(--danger)">${fmt(s.todaySales)}</span></div>
+          <div class="row between" style="margin-top:6px"><span class="muted">订单数</span><span style="font-weight:700">${s.todayOrders}</span></div>
+        </div>
       </div>
-      <div class="card"><div class="section-title">今日概览</div>
-        <div class="row between"><span class="muted">销售额</span><span style="font-weight:700;color:var(--danger)">${fmt(s.todaySales)}</span></div>
-        <div class="row between" style="margin-top:6px"><span class="muted">订单数</span><span style="font-weight:700">${s.todayOrders}</span></div>
-      </div>
+      <div class="${isBoss ? 'me-cols' : 'me-cols me-single'}">
+        <div class="me-col">
       ${isBoss ? `
       <div class="collapse-sec" id="sec-books">
         <button class="sec-head" type="button"><span class="sec-title">📚 套账管理</span><span class="sec-arrow">▸</span></button>
@@ -4743,6 +4948,15 @@ if (d.trust_full) {
           <div id="acc-list" style="margin-top:12px"></div>
         </div>
       </div>` : ''}
+      <div class="collapse-sec" id="sec-td">
+        <button class="sec-head" type="button"><span class="sec-title">🔐 信任设备</span><span class="sec-arrow">▸</span></button>
+        <div class="sec-body">
+          <div class="muted" style="font-size:12px;margin-bottom:8px">勾选「信任此设备」登录后，该设备在 30 天内无需再输入密码。最多信任 4 台，已满后新设备不再被记住（需先解除一台）。以下为当前账户已信任的设备，可随时解除。</div>
+          <div id="td-list"></div>
+        </div>
+      </div>
+        </div>
+        <div class="me-col">
       <div class="collapse-sec open" id="sec-basic">
         <button class="sec-head" type="button"><span class="sec-title">⚙️ 基础设置</span><span class="sec-arrow">▸</span></button>
         <div class="sec-body">
@@ -4804,11 +5018,6 @@ if (d.trust_full) {
           <button class="btn-primary" id="set-btprinter" style="margin-top:4px">管理蓝牙打印机</button>
         </div>
       </div>
-      <div class="collapse-sec" id="sec-td">
-        <button class="sec-head" type="button"><span class="sec-title">🔐 信任设备</span><span class="sec-arrow">▸</span></button>
-        <div class="sec-body">
-          <div class="muted" style="font-size:12px;margin-bottom:8px">勾选「信任此设备」登录后，该设备在 30 天内无需再输入密码。最多信任 4 台，已满后新设备不再被记住（需先解除一台）。以下为当前账户已信任的设备，可随时解除。</div>
-          <div id="td-list"></div>
         </div>
       </div>
       <div class="card muted" style="font-size:12px">店铺：${esc(SHOP)}<br>数据存于服务器 SQLite（按套账隔离），本地不落盘。</div>`;
@@ -5015,7 +5224,7 @@ if (d.trust_full) {
     const list = await API.req('GET', '/api/accounts');
     box.innerHTML = list.map(a => `<div class="list-item"><div class="top"><span class="nm">${esc(a.display_name || a.username)}${a.active ? '' : '（停用）'}</span>
       <span><button class="btn-sm gray" data-aedit="${a.id}">编辑</button> ${a.id === (ME.account && ME.account.id) ? '' : `<button class="btn-sm danger" data-adel="${a.id}">删</button>`}</span></div>
-      <div class="meta">账号 ${esc(a.username)} · 角色 ${esc(a.roleLabel)}</div></div>`).join('');
+      <div class="meta">账号 ${esc(a.username)} · 角色 ${esc(a.roleLabel)} · ${a.permsCustom ? '自定义权限(' + (a.perms || []).length + '项)' : '跟随角色默认权限'}</div></div>`).join('');
     box.querySelectorAll('[data-aedit]').forEach(b => b.onclick = () => editAccount(+b.dataset.aedit, list));
     box.querySelectorAll('[data-adel]').forEach(b => b.onclick = async () => {
       if (!confirm('确认删除该账户？')) return;
@@ -5028,24 +5237,88 @@ if (d.trust_full) {
     try { await API.req('POST', '/api/accounts', body); toast('已添加账户'); $('#acc-user').value = ''; $('#acc-name').value = ''; $('#acc-pwd').value = ''; renderAccounts(); }
     catch (e) { toast(e.message); }
   }
-  function editAccount(id, list) {
+  // 🔴 2026-11-04 账户级权限：权限挂在**账户**上，不再靠改共享角色。
+  //    改一个账户绝不影响其他账户（服务端 /api/accounts/:id 带 WHERE id）。
+  let PERM_CATALOG_CACHE = null;
+  async function loadPermCatalog() {
+    if (PERM_CATALOG_CACHE) return PERM_CATALOG_CACHE;
+    PERM_CATALOG_CACHE = await API.req('GET', '/api/perm-catalog');
+    return PERM_CATALOG_CACHE;
+  }
+  function permPanelHtml(cat, a) {
+    const cur = a.perms || [];
+    const custom = !!a.permsCustom;
+    const groups = (cat.catalog || []).map(g => `
+      <div class="perm-group"><div class="perm-group-t">${esc(g.group)}</div>
+        <div class="perm-items">${(g.items || []).map(it => `
+          <label class="perm-chk"><input type="checkbox" class="perm-box" value="${esc(it.key)}" ${cur.includes(it.key) ? 'checked' : ''}/> ${esc(it.label)}</label>`).join('')}</div>
+      </div>`).join('');
+    return `
+      <div class="perm-panel">
+        <div class="perm-mode">
+          <label><input type="radio" name="ae-permmode" value="role" ${custom ? '' : 'checked'}/> 跟随角色默认（${esc(a.roleLabel || '')}）</label>
+          <label><input type="radio" name="ae-permmode" value="custom" ${custom ? 'checked' : ''}/> 自定义权限</label>
+        </div>
+        <div class="perm-presets">
+          <span class="muted">快捷：</span>
+          <button type="button" class="btn-sm gray" data-preset="sale_only">员工只能开单</button>
+          <button type="button" class="btn-sm gray" data-preset="sale_returns">开单+退货</button>
+          <button type="button" class="btn-sm gray" data-preset="none">全不选</button>
+        </div>
+        <div id="ae-permgroups">${groups}</div>
+      </div>`;
+  }
+  async function editAccount(id, list) {
     const a = list.find(x => x.id === id); if (!a) return;
+    let cat;
+    try { cat = await loadPermCatalog(); }
+    catch (e) { toast('权限清单读取失败：' + e.message); return; }
+    const isSelf = (ME.account && Number(ME.account.id) === Number(id));
+    // 🔴 角色下拉补齐 customer：老版本漏了这一项，编辑客户下单员会被静默改成「员工」
+    const roleOpts = [['staff', '员工'], ['manager', '经理'], ['boss', '老板'], ['customer', '客户下单员']]
+      .map(([v, t]) => `<option value="${v}" ${a.role === v ? 'selected' : ''}>${t}</option>`).join('');
     showModal('编辑账户 ' + a.username, `
       <label>姓名</label><input id="ae-name" value="${esc(a.display_name || '')}"/>
-      <label>角色</label>
-      <select id="ae-role">
-        <option value="staff" ${a.role === 'staff' ? 'selected' : ''}>员工</option>
-        <option value="manager" ${a.role === 'manager' ? 'selected' : ''}>经理</option>
-        <option value="boss" ${a.role === 'boss' ? 'selected' : ''}>老板</option>
-      </select>
+      <label>角色（决定默认权限；下方自定义可覆盖）</label>
+      <select id="ae-role">${roleOpts}</select>
       <label>重置密码（留空=不改）</label><input id="ae-pwd" type="password" placeholder="新密码"/>
       <label>状态</label>
       <select id="ae-active"><option value="1" ${a.active ? 'selected' : ''}>启用</option><option value="0" ${!a.active ? 'selected' : ''}>停用</option></select>
+      <label style="margin-top:14px">功能权限 ${isSelf ? '<span class="muted">（不能改自己的权限）</span>' : ''}</label>
+      ${permPanelHtml(cat, a)}
       <button class="btn-primary" id="ae-save" style="margin-top:14px">保存</button>`);
+
+    const syncMode = () => {
+      const custom = ($('input[name="ae-permmode"]:checked') || {}).value === 'custom';
+      $$('.perm-box').forEach(b => b.disabled = !custom || isSelf);
+      $$('.perm-presets button').forEach(b => b.disabled = !custom || isSelf);
+      $('#ae-permgroups').style.opacity = custom ? '1' : '.45';
+    };
+    $$('input[name="ae-permmode"]').forEach(r => r.onchange = syncMode);
+    $$('.perm-box').forEach(b => b.onchange = () => {
+      const r = $('input[name="ae-permmode"][value="custom"]'); if (r) r.checked = true; syncMode();
+    });
+    $$('.perm-presets button').forEach(b => b.onclick = () => {
+      const preset = (cat.presets || {})[b.dataset.preset] || [];
+      $$('.perm-box').forEach(x => x.checked = preset.includes(x.value));
+      const r = $('input[name="ae-permmode"][value="custom"]'); if (r) r.checked = true; syncMode();
+    });
+    syncMode();
+
     $('#ae-save').onclick = async () => {
       const body = { display_name: $('#ae-name').value.trim(), role: $('#ae-role').value, active: $('#ae-active').value === '1' };
       const pwd = $('#ae-pwd').value; if (pwd) body.password = pwd;
-      try { await API.req('PUT', '/api/accounts/' + id, body); closeModal(); toast('已保存'); renderAccounts(); } catch (e) { toast(e.message); }
+      if (!isSelf) {
+        const mode = ($('input[name="ae-permmode"]:checked') || {}).value;
+        // 🔴 $$ 返回 NodeList（不是数组），必须 Array.from 后才能 .filter/.map
+        body.perms = mode === 'role' ? 'role' : Array.from($$('.perm-box')).filter(x => x.checked).map(x => x.value);
+      }
+      try {
+        await API.req('PUT', '/api/accounts/' + id, body);
+        closeModal(); toast('已保存（权限仅对该账户生效）'); renderAccounts();
+        // 若改的是自己所在账户之外的角色，不影响当前会话；但保险起见重拉身份
+        if (ME.account && Number(ME.account.id) !== Number(id)) { /* 无需刷新自己 */ }
+      } catch (e) { toast(e.message); }
     };
   }
 

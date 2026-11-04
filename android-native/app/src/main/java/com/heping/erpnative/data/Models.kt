@@ -726,3 +726,115 @@ data class PurchaseCreated(
     @SerializedName("item_count") val itemCount: Int = 0
 )
 
+
+
+// ================= 资金管理 / 员工提成（2026-11-04，v5.7.12） =================
+data class FundRecord(
+    val id: Int = 0,
+    @SerializedName("client_fund_id") val clientFundId: String = "",
+    /** 本地待上传标记（非服务端字段，客户端合成） */
+    var pending: Boolean = false,
+    @SerializedName("fund_date") val fundDate: String = "",
+    val direction: String = "out",
+    val category: String = "",
+    val amount: Double = 0.0,
+    val account: String = "",
+    val counterparty: String = "",
+    val remark: String = "",
+    @SerializedName("placed_by_name") val placedByName: String = ""
+)
+
+data class FundsResp(
+    val rows: List<FundRecord> = emptyList(),
+    val income: Double = 0.0,
+    val expense: Double = 0.0,
+    val net: Double = 0.0
+)
+
+data class FundBody(
+    @SerializedName("client_fund_id") val clientFundId: String = "",
+    @SerializedName("fund_date") val fundDate: String,
+    val direction: String,
+    val category: String = "",
+    val amount: Double,
+    val account: String = "",
+    val counterparty: String = "",
+    val remark: String = ""
+)
+
+data class CommissionRateResp(
+    val rate: Double = 0.5,
+    val canEdit: Boolean = false,
+    /** profit=利润分成（默认） / sales=销售额提成（2026-11-04 经理确认口径） */
+    val mode: String = "profit",
+    /** 老板/经理可见的按员工专属规则（未列出的按全局算） */
+    val rules: List<CommissionRule> = emptyList()
+)
+
+data class CommissionRule(
+    @SerializedName("accountId") val accountId: Int = 0,
+    val name: String = "",
+    val role: String = "",
+    val mode: String = "profit",
+    val rate: Double = 0.5
+)
+
+/** 每单提成明细（员工只读，2026-11-04） */
+data class CommissionOrder(
+    val id: Int = 0,
+    val date: String = "",
+    @SerializedName("order_no") val orderNo: String = "",
+    val customer: String = "",
+    val sales: Double = 0.0,
+    val returns: Double = 0.0,
+    @SerializedName("grossProfit") val grossProfit: Double = 0.0,
+    val commission: Double = 0.0,
+    @SerializedName("isReturn") val isReturn: Boolean = false
+)
+
+data class CommissionDay(
+    val date: String = "",
+    val sales: Double = 0.0,
+    val returns: Double = 0.0,
+    @SerializedName("grossProfit") val grossProfit: Double = 0.0,
+    val commission: Double = 0.0,
+    val orders: Int = 0,
+    @SerializedName("returnOrders") val returnOrders: Int = 0
+)
+
+data class CommissionTotal(
+    val sales: Double = 0.0,
+    val returns: Double = 0.0,
+    @SerializedName("grossProfit") val grossProfit: Double = 0.0,
+    val commission: Double = 0.0
+)
+
+data class CommissionMineResp(
+    val rate: Double = 0.5,
+    val mode: String = "profit",
+    /** true = 该员工有专属规则；false = 按全局 */
+    @SerializedName("custom") val custom: Boolean = false,
+    val days: List<CommissionDay> = emptyList(),
+    val orders: List<CommissionOrder> = emptyList(),
+    val total: CommissionTotal = CommissionTotal()
+)
+
+data class CommissionPerson(
+    val id: Int? = null,
+    val name: String = "",
+    val sales: Double = 0.0,
+    val returns: Double = 0.0,
+    @SerializedName("grossProfit") val grossProfit: Double = 0.0,
+    val commission: Double = 0.0,
+    val mode: String = "profit",
+    val rate: Double = 0.5,
+    @SerializedName("custom") val custom: Boolean = false,
+    val orders: Int = 0,
+    @SerializedName("returnOrders") val returnOrders: Int = 0
+)
+
+data class CommissionAllResp(
+    val rate: Double = 0.5,
+    val mode: String = "profit",
+    val people: List<CommissionPerson> = emptyList()
+)

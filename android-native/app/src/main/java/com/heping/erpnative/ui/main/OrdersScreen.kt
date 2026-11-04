@@ -45,32 +45,43 @@ fun OrdersScreen(
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     var pickerTarget by remember { mutableStateOf<Int?>(null) }
-    var showReturns by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<com.heping.erpnative.data.Order?>(null) }
     // 🔴 2026-10-28：左右滑「同时只展开一行」——滑开新行时旧行自动收回，
     //    避免多行同时露出按钮导致「关不掉」的错觉（经理：滑回正常显示很难）。
     var expandedOrderId by remember { mutableStateOf<Int?>(null) }
     val canDelete = SessionStore.can("order.delete")
     val canEdit = SessionStore.can("order.edit")
-    val dateState = rememberDatePickerState(initialSelectedDateMillis = System.currentTimeMillis())
 
     LaunchedEffect(Unit) { vm.loadOrders() }
 
     if (pickerTarget != null) {
-        DatePickerDialog(
-            onDismissRequest = { pickerTarget = null },
-            confirmButton = {
-                TextButton(onClick = {
-                    dateState.selectedDateMillis?.let { millis ->
-                        val ymd = ymdFromMillis(millis)
-                        if (pickerTarget == 0) vm.from = ymd else vm.to = ymd
-                        vm.loadOrders()
-                    }
-                    pickerTarget = null
-                }) { Text("确定") }
-            },
-            dismissButton = { TextButton(onClick = { pickerTarget = null }) { Text("取消") } }
-        ) { DatePicker(state = dateState) }
+        // 🔴 v5.7.15：日期选择器初值跟随「当前已选的开始/结束」，不再是写死的今天 ——
+        //    原来不管点哪个都跳到今天，改结束日期时得重新翻月找，容易选错。
+        //   🔴 必须用 key(pickerTarget) 包住：rememberDatePickerState 的 initial 只在**首次组合**生效，
+        //      只用 remember(seed) 算初值不会重建 picker 状态，第二次打开还是上一次的日期。
+        key(pickerTarget) {
+            val seed = if (pickerTarget == 0) vm.from else vm.to
+            val initMillis = try {
+                if (seed != null) java.time.LocalDate.parse(seed)
+                    .atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+                else System.currentTimeMillis()
+            } catch (_: Exception) { System.currentTimeMillis() }
+            val dateState = rememberDatePickerState(initialSelectedDateMillis = initMillis)
+            DatePickerDialog(
+                onDismissRequest = { pickerTarget = null },
+                confirmButton = {
+                    TextButton(onClick = {
+                        dateState.selectedDateMillis?.let { millis ->
+                            val ymd = ymdFromMillis(millis)
+                            if (pickerTarget == 0) vm.from = ymd else vm.to = ymd
+                            vm.loadOrders()
+                        }
+                        pickerTarget = null
+                    }) { Text("确定") }
+                },
+                dismissButton = { TextButton(onClick = { pickerTarget = null }) { Text("取消") } }
+            ) { DatePicker(state = dateState) }
+        }
     }
 
     // 删除确认（滑动露出「删除」后触发）
@@ -142,33 +153,47 @@ fun OrdersScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedButton(onClick = { pickerTarget = 0 }, modifier = Modifier.weight(1f)) {
-                Text("开始：${vm.from ?: "全部"}")
+                Text("开始：${vm.from ?: "不限"}")
             }
             Spacer(Modifier.width(8.dp))
             OutlinedButton(onClick = { pickerTarget = 1 }, modifier = Modifier.weight(1f)) {
-                Text("结束：${vm.to ?: "全部"}")
+                Text("结束：${vm.to ?: "不限"}")
             }
         }
+        // ---------- 筛选区 ----------
+        // 🔴 v5.7.15 经理「上面除了日期选择以外的几个按钮有重复」：
+        //   原来两行各有「全部」——第 2 行是**日期**「全部」，第 3 行是**类型**「全部」，
+        //   同名不同义，用户分不清点哪个、也不知道当前生效的是哪一个。
+        //   改法：① 日期那一档改名「不限」（一眼看出是日期口径）
+        //         ② 类型行加「类型」前缀标签
+        //         ③ 两组都用 FilterChip **带选中态**，当前生效的筛选看得见
+        //         ④ 类型筛选交给服务端 status 过滤（原来客户端 filter 会被 LIMIT 截断成假空）
+        val isToday = vm.from == todayStr() && vm.to == todayStr()
+        val isLast7 = vm.from == daysAgo(6) && vm.to == todayStr()
+        val isMonth = vm.from == monthStart() && vm.to == todayStr()
+        val isAllDate = vm.from == null && vm.to == null
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            QuickChip("今天") { vm.setToday() }
+            QuickChip("今天", isToday) { vm.setToday() }
             Spacer(Modifier.width(6.dp))
-            QuickChip("近7天") { vm.setLast7() }
+            QuickChip("近7天", isLast7) { vm.setLast7() }
             Spacer(Modifier.width(6.dp))
-            QuickChip("本月") { vm.setMonth() }
+            QuickChip("本月", isMonth) { vm.setMonth() }
             Spacer(Modifier.width(6.dp))
-            QuickChip("全部") { vm.setAll() }
+            QuickChip("不限", isAllDate) { vm.setAll() }
         }
-        // 类型筛选：全部 / 仅退货
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            QuickChip("全部") { showReturns = false }
+            Text("类型", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(6.dp))
-            QuickChip("仅退货") { showReturns = true }
+            QuickChip("全部单", !vm.onlyReturns) { vm.applyOnlyReturns(false) }
+            Spacer(Modifier.width(6.dp))
+            QuickChip("仅退货", vm.onlyReturns) { vm.applyOnlyReturns(true) }
         }
 
         // 关键词模糊搜索：订单号 / 门店 / 备注（空格拆多关键词，按相关度排序）
@@ -180,9 +205,8 @@ fun OrdersScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
         )
-        val byType = if (showReturns) vm.orders.filter { (it.status ?: "") == "returned" } else vm.orders
-        val display = remember(byType, keyword) {
-            Fuzzy.filter(byType, keyword) { listOf(it.orderNo, it.customerName, it.remark) }
+        val display = remember(vm.orders, keyword) {
+            Fuzzy.filter(vm.orders, keyword) { listOf(it.orderNo, it.customerName, it.remark) }
         }
         if (keyword.isNotBlank()) {
             Text(
@@ -228,7 +252,7 @@ fun OrdersScreen(
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     if (keyword.isNotBlank()) "无匹配订单（试试少输几个字，或用空格拆关键词）"
-                    else if (showReturns) "暂无退货单" else "暂无订单"
+                    else if (vm.onlyReturns) "暂无退货单" else "暂无订单"
                 )
             }
         } else {
@@ -416,13 +440,23 @@ suspend fun printOrderById(ctx: android.content.Context, id: Int): PrintResult {
     } catch (_: Exception) { PrintResult.FETCH_FAIL }
 }
 
+/**
+ * 快捷筛选胶囊（v5.7.15 起支持选中态）。
+ * 🔴 必须能看出「当前生效的是哪一个」—— 原来全部长一样，用户点完不知道结果里到底是哪个条件。
+ */
 @Composable
-private fun QuickChip(label: String, onClick: () -> Unit) {
-    OutlinedButton(
-        onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)
-    ) {
-        Text(label, style = MaterialTheme.typography.labelSmall)
+private fun QuickChip(label: String, selected: Boolean = false, onClick: () -> Unit) {
+    if (selected) {
+        FilterChip(
+            selected = true,
+            onClick = onClick,
+            label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+        )
+    } else {
+        AssistChip(
+            onClick = onClick,
+            label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+        )
     }
 }
 

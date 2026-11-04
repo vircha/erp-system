@@ -135,11 +135,14 @@
       <nav>
         <button data-page="sale" class="active"><span class="ti">🧾</span><span class="tl">开单</span></button>
         <button data-page="orders"><span class="ti">📋</span><span class="tl">订单</span></button>
-        <button data-page="purchase" class="hidden"><span class="ti">🚚</span><span class="tl">采购</span></button>
-        <button data-page="products"><span class="ti">📦</span><span class="tl">商品</span></button>
-        <button data-page="customers"><span class="ti">🏪</span><span class="tl">客户</span></button>
-        <!-- 采购与库存：经理/老板可见（applyPerms 按 purchase.view / inventory.view 开关）-->
-        <button data-page="analytics"><span class="ti">📊</span><span class="tl">报表</span></button>
+        <!-- 🔴 2026-11-04 功能收纳：采购/商品/客户/报表 收进「功能」抽屉宫格 -->
+        <button data-page="functions" id="nav-functions"><span class="ti">🧰</span><span class="tl">功能</span></button>
+        <button data-page="purchase" class="hidden" data-folded="1"><span class="ti">🚚</span><span class="tl">采购</span></button>
+        <button data-page="products" class="hidden" data-folded="1"><span class="ti">📦</span><span class="tl">商品</span></button>
+        <button data-page="customers" class="hidden" data-folded="1"><span class="ti">🏪</span><span class="tl">客户</span></button>
+        <button data-page="analytics" class="hidden" data-folded="1"><span class="ti">📊</span><span class="tl">报表</span></button>
+        <button data-page="funds" class="hidden" data-folded="1"><span class="ti">💵</span><span class="tl">资金流水</span></button>
+        <button data-page="commission" class="hidden" data-folded="1"><span class="ti">🏅</span><span class="tl">员工提成</span></button>
         <button data-page="admin" class="hidden"><span class="ti">🛡️</span><span class="tl">管理</span></button>
         <!-- 我的欠款：仅客户账号可见，默认 hidden，由 applyPerms() 按角色打开 -->
         <button data-page="myar" class="hidden"><span class="ti">💰</span><span class="tl">我的欠款</span></button>

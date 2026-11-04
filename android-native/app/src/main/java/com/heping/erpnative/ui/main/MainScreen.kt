@@ -1,10 +1,15 @@
 package com.heping.erpnative.ui.main
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -18,8 +23,9 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    // 🔴 v5.7.0 经理 2026-10-21 指定顺序：开单 订单 采购 商品 客户 报表 我的欠款 设置
-    //    （采购提到商品/客户前面；设置保持最后）
+    // 🔴 v5.7.12 经理 2026-11-04：按钮太多 → 采购/商品/客户/报表/资金/提成 收进「功能」宫格。
+    //    底部只留 开单 / 订单 / 功能 / 设置 四项；其余 Tab 枚举**保留**供宫格跳转复用。
+    Func("功能", Icons.Filled.GridView),
     Sale("开单", Icons.Filled.PointOfSale),
     Orders("订单", Icons.Filled.ReceiptLong),
     // 采购含进价（成本信息），只有 boss/manager 有 purchase.view；员工没这权限时该Tab 自动不显示。
@@ -28,7 +34,10 @@ enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.
     Customers("客户", Icons.Filled.People),
     Reports("报表", Icons.Filled.BarChart),
     MyAr("我的欠款", Icons.Filled.AccountBalanceWallet),
-    Settings("设置", Icons.Filled.Settings)
+    Settings("设置", Icons.Filled.Settings),
+    // 🔴 只从「功能」宫格进入，不出现在底部导航
+    Funds("资金流水", Icons.Filled.AttachMoney),
+    Commission("员工提成", Icons.Filled.EmojiEvents)
 }
 
 /**
@@ -37,24 +46,60 @@ enum class Tab(val label: String, val icon: androidx.compose.ui.graphics.vector.
  * 所以**不能只按 perms 过滤**，必须按角色硬限定，否则客户能看到商品库/客户库入口。
  */
 private fun visibleTabs(): List<Tab> {
+    // 🔴 v5.7.12：底部只留 开单 / 订单 / 功能 / 设置
     if (SessionStore.isCustomer) return listOf(Tab.Sale, Tab.Orders, Tab.MyAr)
-    return Tab.values().filter { t ->
-        when (t) {
-            // 报表页含销售分析（analysis.view）与货款（ar.view）两种权限，
-            // 员工没 ar.view 就退回只显示销售那组，别整页藏起来。
-            Tab.Reports -> SessionStore.can("analysis.view") || SessionStore.can("ar.view")
-            Tab.MyAr -> false          // 我的欠款仅客户账号
-            // 🔴 采购页：采购建议/采购单要 purchase.view，库存明细/流水要 inventory.view。
-            //    两者都拿不到就整个页签不显示（staff 只有 inventory.view → 只看得到库存那两页）。
-            Tab.Purchase -> SessionStore.can("purchase.view") || SessionStore.can("inventory.view")
-            else -> true
-        }
-    }
+    return listOf(Tab.Sale, Tab.Orders, Tab.Func, Tab.Settings)
 }
 
 @Composable
 fun MainScreen(onLogout: () -> Unit) {
     var tab by remember { mutableStateOf(Tab.Sale) }
+    // 🔴 v5.7.13 系统返回键：从二级页退回上一级，不再直接退桌面。
+    //    backStack 记录「来路」；goTo() 统一压栈；BackHandler 弹栈。
+    //    一级主页：Sale 不拦截（保留系统默认退出）；其它主页回 Sale（常见 App 行为）。
+    var backStack by remember { mutableStateOf(listOf<Tab>()) }
+    val mainTabs = listOf(Tab.Sale, Tab.Orders, Tab.Func, Tab.Settings)
+    fun goTo(t: Tab) {
+        if (t == tab) return
+        backStack = backStack + tab
+        tab = t
+    }
+    // 🔴 v5.7.13：最上一级（开单页且无返回栈）按返回 → 气泡提醒一次，
+    //    2 秒内再按一次才真正退出（Android 常见「双击退出」惯例，防误触退桌面）。
+    var lastBackAt by remember { mutableStateOf(0L) }
+    var backToast by remember { mutableStateOf<String?>(null) }
+    val activity = LocalContext.current as? android.app.Activity
+    BackHandler(enabled = true) {
+        when {
+            backStack.isNotEmpty() -> {
+                tab = backStack.last()
+                backStack = backStack.dropLast(1)
+                backToast = null
+            }
+            tab != Tab.Sale -> {
+                // 一级其它主页（订单/功能/设置）→ 回开单页
+                tab = Tab.Sale
+                backToast = null
+            }
+            else -> {
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastBackAt < 2000) {
+                    activity?.finish()          // 第二次 → 真的退出
+                } else {
+                    lastBackAt = now
+                    backToast = "再返回一次则退出软件"
+                }
+            }
+        }
+    }
+    // 气泡提醒定时器：2 秒后自动消失并复位双击计时
+    backToast?.let { msg ->
+        LaunchedEffect(msg, lastBackAt) {
+            kotlinx.coroutines.delay(2000)
+            backToast = null
+            lastBackAt = 0L
+        }
+    }
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val saleVm: SaleViewModel = viewModel()
@@ -75,6 +120,7 @@ fun MainScreen(onLogout: () -> Unit) {
         scope.launch {
             if (saleVm.prepareEdit(id)) {
                 saleReturnTab = Tab.Orders
+                backStack = backStack + tab
                 tab = Tab.Sale
             } else {
                 toast(ctx, "打开订单失败：" + (saleVm.error ?: "请重试"), long = true)
@@ -87,6 +133,7 @@ fun MainScreen(onLogout: () -> Unit) {
         if (back != null) {
             ordersVm.loadOrders()
             tab = back
+            backStack = backStack.dropLast(1)
         }
     }
 
@@ -109,7 +156,10 @@ fun MainScreen(onLogout: () -> Unit) {
                 visibleTabs().forEach { t ->
                     NavigationBarItem(
                         selected = tab == t,
-                        onClick = { tab = t },
+                        onClick = {
+                            if (t in mainTabs) backStack = emptyList()
+                            goTo(t)
+                        },
                         icon = { Icon(t.icon, contentDescription = t.label) },
                         label = { Text(t.label) }
                     )
@@ -119,18 +169,38 @@ fun MainScreen(onLogout: () -> Unit) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
+                Tab.Func -> FuncScreen(onPick = { picked -> goTo(picked) })
+                Tab.Funds -> FundsScreen(onBack = { tab = Tab.Func; backStack = emptyList() })
+                Tab.Commission -> CommissionScreen(onBack = { tab = Tab.Func; backStack = emptyList() })
                 Tab.Sale -> {
                     // 进开单页时刷新待同步数量（离线条数可能刚被别的入口改过）
                     LaunchedEffect(Unit) { saleVm.refreshPendingCount() }
                     SaleScreen(vm = saleVm, onEditingDone = leaveSale)
                 }
                 Tab.Orders -> OrdersScreen(vm = ordersVm, onEditOrder = gotoSaleForEdit)
-                Tab.Customers -> CustomersScreen(vm = customersVm, arVm = arVm)
-                Tab.Products -> ProductsScreen(vm = productsVm)
-                Tab.Reports -> ReportsScreen(analyticsVm = analyticsVm, arVm = arVm)
+                Tab.Customers -> CustomersScreen(vm = customersVm, arVm = arVm,
+                    onBack = { tab = Tab.Func; backStack = emptyList() })
+                Tab.Products -> ProductsScreen(vm = productsVm,
+                    onBack = { tab = Tab.Func; backStack = emptyList() })
+                Tab.Reports -> ReportsScreen(analyticsVm = analyticsVm, arVm = arVm,
+                    onBack = { tab = Tab.Func; backStack = emptyList() })
                 Tab.MyAr -> MyArScreen(arVm = arVm)
                 Tab.Settings -> SettingsScreen(vm = settingsVm, onLogout = onLogout)
-                Tab.Purchase -> PurchaseScreen(vm = purchaseVm)
+                Tab.Purchase -> PurchaseScreen(vm = purchaseVm,
+                    onBack = { tab = Tab.Func; backStack = emptyList() })
+            }
+            // 🔴 气泡放 content 内最后绘制 → 盖在页面内容之上；避开底部导航栏
+            backToast?.let { msg ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.inverseSurface,
+                        shape = RoundedCornerShape(20.dp),
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    ) {
+                        Text(msg, color = MaterialTheme.colorScheme.inverseOnSurface,
+                            fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp))
+                    }
+                }
             }
         }
     }

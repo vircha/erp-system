@@ -31,7 +31,7 @@ import com.heping.erpnative.vm.ProductsViewModel
 import kotlinx.coroutines.launch
 
 @Composable
-fun ProductsScreen(vm: ProductsViewModel) {
+fun ProductsScreen(vm: ProductsViewModel, onBack: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val canEdit = SessionStore.can("product.edit")
     var query by remember { mutableStateOf("") }
@@ -57,7 +57,7 @@ fun ProductsScreen(vm: ProductsViewModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar("商品")
+        TopBar("商品", onBack)
         OfflineBanner(vm.offline)
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(

@@ -37,7 +37,7 @@ private enum class CustDlg { None, Pay, Unsettled }
  * 可直接「收款」（管家婆式挂账核销）或看「未结明细」。
  */
 @Composable
-fun CustomersScreen(vm: CustomersViewModel, arVm: ArViewModel) {
+fun CustomersScreen(vm: CustomersViewModel, arVm: ArViewModel, onBack: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val canEdit = SessionStore.can("customer.edit")
@@ -106,7 +106,7 @@ fun CustomersScreen(vm: CustomersViewModel, arVm: ArViewModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar("客户")
+        TopBar("客户", onBack)
         OfflineBanner(vm.offline)
 
         // ---- 欠款总览卡 ----

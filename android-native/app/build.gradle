@@ -50,8 +50,12 @@ android {
         //   ③ 服务端折前价恒取历史值（防篡改），折扣上限 = 历史折扣（不能退得比当初实收多）；
         //   ④ 老客户端不传该字段 → 逐分沿用历史成交价，与 v5.7.8 完全一致（零回归）。
         //   ⑤ 同版修「销售总额虚高」：/api/analytics 等三处 JOIN 扇出导致金额被累加 N 次。
-        versionCode 69
-        versionName "5.7.11"
+        // 🔴 v5.7.14：① 设置页折叠栏加流畅动画（AnimatedVisibility + 箭头旋转）
+        //   ② 「app名称不用写」：App 内不再显示「简单ERP」文案（改用图标），桌面图标名去掉「(原生)」
+        // 🔴 v5.7.15：① 订单页顶部按钮去重（两处「全部」→「不限」+「全部单」）+ 修「不限」点了不生效
+        //   ② 类型筛选改服务端 status 过滤 ③ 全面屏底部导航条配色跟随主题
+        versionCode 73
+        versionName "5.7.15"
         vectorDrawables { useSupportLibrary true }
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——

@@ -375,6 +375,32 @@ interface ErpApi {
     @GET("api/stats")
     suspend fun stats(): Stats
 
+    // ---------- 资金管理（2026-11-04） ----------
+    @GET("api/funds")
+    suspend fun funds(@Query("from") from: String? = null, @Query("to") to: String? = null,
+                      @Query("direction") direction: String? = null): FundsResp
+
+    @POST("api/funds")
+    suspend fun addFund(@Body body: FundBody): Map<String, Any>
+
+    @DELETE("api/funds/{id}")
+    suspend fun deleteFund(@Path("id") id: Int): Map<String, Any>
+
+    // ---------- 员工提成（2026-11-04） ----------
+    @GET("api/commission/config")
+    suspend fun commissionConfig(): CommissionRateResp
+
+    @PUT("api/commission/config")
+    // 🔴 body 必须 Any：全局设置传 {rate, mode}，按员工设置传 {account_id, mode, rate}，
+    //    删除专属规则传 {account_id}。用 Map<String, Double> 会把 mode/account_id 挡在编译期外。
+    suspend fun setCommissionRate(@Body body: Map<String, Any>): Map<String, Any>
+
+    @GET("api/commission/mine")
+    suspend fun commissionMine(@Query("from") from: String? = null, @Query("to") to: String? = null): CommissionMineResp
+
+    @GET("api/commission/all")
+    suspend fun commissionAll(@Query("from") from: String? = null, @Query("to") to: String? = null): CommissionAllResp
+
     @GET("api/analysis/monthly")
     suspend fun monthly(): List<Monthly>
 

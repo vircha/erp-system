@@ -65,7 +65,7 @@ import java.util.Locale
 private val SUB_TABS = listOf("采购建议" to "sug", "采购单" to "ord", "库存明细" to "inv", "库存流水" to "mv")
 
 @Composable
-fun PurchaseScreen(vm: PurchaseViewModel) {
+fun PurchaseScreen(vm: PurchaseViewModel, onBack: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     var tab by remember { mutableStateOf("sug") }
@@ -131,7 +131,7 @@ fun PurchaseScreen(vm: PurchaseViewModel) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar("采购与库存")
+        TopBar("采购与库存", onBack)
         SubTabs(tabs, tab) { tab = it }
         ErrorText(vm.error)
 
