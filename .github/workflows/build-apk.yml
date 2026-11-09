@@ -148,10 +148,28 @@ jobs:
             echo "::notice::正式包域名校验通过（不含 example.com）"
           fi
 
-          VC=$(grep -m1 "versionCode" app/build.gradle | grep -oE '[0-9]+')
-          VN=$(grep -m1 "versionName" app/build.gradle | sed "s/.*versionName *//;s/['\"]//g")
+          # 🔴 build.gradle 里是三元表达式：
+          #      versionCode isRelease ? relVc : 904
+          #      versionName isRelease ? relVn : "6.0.8-demo"
+          #    老写法 `sed "s/.*versionName *//"` 会把整段三元表达式当版本号（曾产出
+          #    「visRelease ? relVn : 6.0.8-demo」这种标题），必须按冒号后取值。
+          VC=$(grep -m1 "versionCode" app/build.gradle | grep -oE '[0-9]+' | tail -1)
+          VN=$(grep -m1 "versionName" app/build.gradle | awk -F': ' '{print $NF}' | tr -d '"' | tr -d ' ')
           echo "vc=$VC" >> "$GITHUB_OUTPUT"
           echo "vn=$VN" >> "$GITHUB_OUTPUT"
+
+      - name: 准备发布说明
+        id: notes
+        run: |
+          F="RELEASE_NOTES_${GITHUB_REF_NAME}.md"
+          if [ -f "$F" ]; then
+            cp "$F" release-body.md
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "使用发布说明：$F"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "未找到 $F，使用内置文案"
+          fi
 
       - name: 创建 Release 并上传 APK
         uses: softprops/action-gh-release@v2
@@ -159,6 +177,7 @@ jobs:
           HAS_KS: ${{ steps.ks.outputs.has_ks }}
         with:
           name: v${{ steps.art.outputs.vn }}（versionCode ${{ steps.art.outputs.vc }}）
+          body_path: ${{ steps.notes.outputs.found == 'true' && 'release-body.md' || '' }}
           body: |
             自动构建产物：versionName `${{ steps.art.outputs.vn }}` / versionCode `${{ steps.art.outputs.vc }}`
 
