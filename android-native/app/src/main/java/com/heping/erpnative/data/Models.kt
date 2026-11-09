@@ -22,6 +22,9 @@ data class Book(val id: Int = 1, val name: String = "", val role: String? = null
 
 data class AuthResponse(
     val token: String = "",
+    // 🔴 2026-11-08 注册审核：pending=true 表示注册成功但**待管理员审核**，此时没有 token
+    val pending: Boolean = false,
+    val message: String? = null,
     val account: Account? = null,
     val book: Book? = null,
     val role: String = "staff",
@@ -60,6 +63,12 @@ data class RegisterRequest(
     @SerializedName("book_id") val bookId: Int? = null,
     @SerializedName("book_name") val bookName: String? = null,
     @SerializedName("join_password") val joinPassword: String? = null,
+    // 🔴 2026-11-07：改为只认邀请码加入套账（不再传 book_id，避免暴露套账列表）
+    @SerializedName("invite_code") val inviteCode: String? = null,
+    // 🔴 2026-11-08 短信验证码（服务端开了短信通道时必填）
+    @SerializedName("sms_code") val smsCode: String? = null,
+    // 🔴 2026-11-09 邮箱验证码（邮箱注册为主通道）
+    @SerializedName("email_code") val emailCode: String? = null,
     @SerializedName("trust_device") val trustDevice: Boolean = false,
     val device: String? = null,
     @SerializedName("captcha_id") val captchaId: String,
@@ -109,6 +118,9 @@ data class Product(
     // 列表接口 JOIN 出来的库存字段
     val qty: Double = 0.0,
     @SerializedName("low_threshold") val lowThreshold: Double = 0.0,
+    // 🔴 2026-11-07：商品图片，存**相对 URL**（/uploads/products/xxx.jpg）。
+    //    空串 = 没有图片 → 界面显示默认占位图。老数据是 NULL，用 isNullOrBlank 判定。
+    val image: String? = null,
     val created_at: String? = null
 )
 
@@ -328,7 +340,19 @@ data class UpdateInfo(
     val url: String = "",
     @SerializedName("r2Url") val r2Url: String = "",
     val desc: String = "",
-    val force: Boolean = false
+    val force: Boolean = false,
+    // 🔴 v6.0.2：最近几次的更新说明（服务端按时间倒序，最多 3 条）。
+    //    经理要求"显示最新 3 次的更新说明" —— 只给一条的话，用户看不出这次改了什么、上次改了什么。
+    //    ⚠️ 老服务器没有这个字段 → 默认空列表，界面自动回退到只显示 desc（向后兼容）。
+    val history: List<UpdateNote> = emptyList()
+)
+
+/** 一条历史更新说明 */
+data class UpdateNote(
+    @SerializedName("versionName") val versionName: String = "",
+    @SerializedName("desc") val desc: String = "",
+    /** 发布日期（yyyy-MM-dd），可为空 */
+    @SerializedName("date") val date: String = ""
 )
 
 // ---------- 数据分析 ----------
@@ -837,4 +861,18 @@ data class CommissionAllResp(
     val rate: Double = 0.5,
     val mode: String = "profit",
     val people: List<CommissionPerson> = emptyList()
+)
+
+/** 短信通道状态：required=true 时注册必须填短信验证码 */
+data class SmsStatus(
+    val required: Boolean = false,
+    val ttl: Int = 300,
+    @SerializedName("resend") val resend: Int = 60
+)
+
+/** 发送短信结果 */
+data class SmsSendResp(
+    val ok: Boolean = false,
+    val ttl: Int = 300,
+    val mock: Boolean = false
 )

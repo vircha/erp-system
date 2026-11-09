@@ -128,12 +128,19 @@ object SessionStore {
         }
     }
 
-    /** 启动时尝试从持久化恢复登录态；返回是否已有会话 */
+    /** 启动时尝试从持久化恢复登录态；返回是否已有会话（或有设备令牌可用） */
     suspend fun restore(): Boolean {
         val p = ctx.dataStore.data.first()
-        val t = p[TOKEN] ?: return false
-        token = try { Crypto.decrypt(t) } catch (_: Exception) { return false }
+        // 🔴🔴 2026-11-07 修复「信任设备不起作用、每次都要输密码」：
+        //   原实现是 `val t = p[TOKEN] ?: return false` —— 没有**会话令牌**就直接返回，
+        //   于是 deviceToken 永远没被读出来 → 上层拿不到设备令牌 → 免密彻底失效。
+        //   只要发生过一次「会话被清」（退出登录会保留设备令牌但删掉 TOKEN；
+        //   服务器重启会让旧 TOKEN 失效后走到清会话分支），之后就再也免密不了。
+        //   正确顺序：**先读设备令牌**，再读会话令牌；两者有其一就算可恢复。
         deviceToken = p[DEVICE]?.let { try { Crypto.decrypt(it) } catch (_: Exception) { null } }
+        val t = p[TOKEN]
+        token = t?.let { try { Crypto.decrypt(it) } catch (_: Exception) { null } }
+        if (token == null && deviceToken == null) return false
         role = p[ROLE] ?: "staff"
         perms = (p[PERMS] ?: "").split(",").filter { it.isNotBlank() }
         bookId = (p[BOOK_ID] ?: 1L).toInt()
@@ -239,8 +246,25 @@ interface ErpApi {
     @POST("api/login")
     suspend fun login(@Body b: LoginRequest): AuthResponse
 
+    // 🔴 2026-11-07：改用强类型 RegisterRequest。
+    //   原来传 Map<String,String> → trust_device 只能写 "0"/"1" 字符串，
+    //   而服务端是 `if (b.trust_device)` 判真值 → "0" 也是真 → 永远被信任。必须用 Boolean。
+    // 短信验证码（2026-11-08）
+    @GET("api/sms/status")
+    suspend fun smsStatus(): SmsStatus
+
+    @POST("api/sms/send")
+    suspend fun sendSms(@Body b: Map<String, String>): SmsSendResp
+
+    // 邮箱验证码（2026-11-09 主通道）
+    @GET("api/email/status")
+    suspend fun emailStatus(): SmsStatus
+
+    @POST("api/email/send")
+    suspend fun sendEmailCode(@Body b: Map<String, String>): SmsSendResp
+
     @POST("api/register")
-    suspend fun register(@Body b: Map<String, String>): AuthResponse
+    suspend fun register(@Body b: RegisterRequest): AuthResponse
 
     @POST("api/trusted-login")
     suspend fun trustedLogin(@Body b: Map<String, String>): AuthResponse
@@ -281,6 +305,19 @@ interface ErpApi {
 
     @DELETE("api/products/{id}")
     suspend fun deleteProduct(@Path("id") id: Int): OkResponse
+
+    // 🔴 2026-11-07 商品图片：走 base64 JSON（项目无 multer，手写 multipart 易出边界 bug）。
+    //    客户端已把图压到 ~200KB，base64 后仍远低于服务端 10MB 上限。
+    @POST("api/products/{id}/image")
+    suspend fun uploadProductImage(@Path("id") id: Int, @Body b: Map<String, String>): Map<String, String>
+
+    @DELETE("api/products/{id}/image")
+    suspend fun deleteProductImage(@Path("id") id: Int): OkResponse
+
+    // 🔴 2026-11-07 平台图库匹配：按条码（优先）/名称（模糊）在**全平台**找同类商品图。
+    //    服务端只回一个本地图片地址，**不透露图来自哪个账套/用户**（匹配全在后台做）。
+    @POST("api/product-image/match")
+    suspend fun matchProductImage(@Body b: Map<String, String>): Map<String, String>
 
     // 开单 / 订单
     @POST("api/orders")
@@ -520,8 +557,10 @@ object ErpClient {
                             return@Interceptor chain.proceed(retry)
                         } catch (_: Exception) { /* 续期失败，落到下面处理 */ }
                     }
-                    // 无设备令牌或续期失败：清空会话并退回登录页
-                    runBlocking { SessionStore.clear() }
+                    // 🔴 2026-11-07：续期失败只清「会话」，**必须保留设备令牌**。
+                    //   原来调的是 clear()（连 DEVICE 一起抹），等于一次偶发失败就把这台设备
+                    //   永久踢出信任名单 —— 下次必须重新输密码，正是经理反馈的现象。
+                    runBlocking { SessionStore.logoutKeepDevice() }
                     onForceLogout?.invoke()
                 }
                 resp
