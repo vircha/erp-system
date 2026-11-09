@@ -6,6 +6,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -77,6 +78,8 @@ fun LoginScreen(onEntered: () -> Unit, vm: AuthViewModel = viewModel()) {
     var panel by remember { mutableStateOf(false) }
     var booting by remember { mutableStateOf(true) }
     var showBooks by remember { mutableStateOf(false) }
+    // 🔴 2026-11-07 新增注册：独立页面（不再只有网页版能注册）
+    var showRegister by remember { mutableStateOf(false) }
 
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -121,15 +124,33 @@ fun LoginScreen(onEntered: () -> Unit, vm: AuthViewModel = viewModel()) {
         return
     }
 
+    // 🔴 注册页（与登录表单互斥切换）
+    if (showRegister) {
+        RegisterScreen(
+            vm = vm,
+            onBack = { showRegister = false },
+            onEntered = onEntered
+        )
+        return
+    }
+
     // ---------------- 账密登录表单 ----------------
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         // 🔴 v5.7.14 经理「app名称不用写（原生）」：原生 App 不再写应用名，用图标代替
+        // 🔴🔴 v6.0 闪退修复：这里原来引用 `R.mipmap.ic_launcher`。
+        //   在 Android 8+ 上该资源会解析到 **自适应图标 XML**（mipmap-anydpi-v26/ic_launcher.xml），
+        //   而 Compose 的 painterResource 只支持 PNG/JPG/WEBP 与 VectorDrawable ——
+        //   解不了 adaptive-icon，直接抛：
+        //     IllegalArgumentException: Only VectorDrawables and rasterized asset types are supported
+        //   于是**登录页一渲染就闪退**。而老用户都保持着登录态、根本不进登录页，
+        //   所以这个 bug 在正式版里一直潜伏着（谁「退出登录」谁必崩）。
+        //   修法：改用一张真正的 PNG（drawable-nodpi/ic_launcher_logo.png）。
         Image(
-            painter = painterResource(R.mipmap.ic_launcher),
+            painter = painterResource(R.drawable.ic_launcher_logo),
             contentDescription = null,
             modifier = Modifier.size(64.dp).clip(RoundedCornerShape(16.dp))
         )
@@ -212,7 +233,11 @@ fun LoginScreen(onEntered: () -> Unit, vm: AuthViewModel = viewModel()) {
             else Text("登录")
         }
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(6.dp))
+        TextButton(onClick = { showRegister = true }) {
+            Text("还没有账号？注册账户", style = MaterialTheme.typography.labelMedium)
+        }
+        Spacer(Modifier.height(2.dp))
         TextButton(onClick = { openUrl(ctx, APK_URL) }) {
             Text("下载手机版（安卓 APK）", style = MaterialTheme.typography.labelMedium)
         }
@@ -242,7 +267,7 @@ private fun TrustedPanel(
     val books = vm.books
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
+        Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {

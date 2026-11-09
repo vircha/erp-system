@@ -344,9 +344,48 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
                     }
                 }
             }
-            vm.updateInfo?.desc?.let {
-                Spacer(Modifier.height(4.dp))
-                Text("更新说明：$it", style = MaterialTheme.typography.labelSmall)
+            // 🔴🔴 v6.0.2 经理要求：显示**最近 3 次**的更新说明。
+            //   原来只显示一条 desc —— 用户看不出"这次改了什么、上次改了什么"。
+            //   服务端 update.json 的 history 已按时间倒序给出（最多 3 条）。
+            //   ⚠️ 老服务器没有 history 字段 → 自动回退成只显示 desc，不会出现空白。
+            run {
+                val notes = vm.updateInfo?.history.orEmpty()
+                if (notes.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("最近更新", style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    notes.take(3).forEach { n ->
+                        Column(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "v${n.versionName}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                if (n.date.isNotBlank()) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        n.date,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Text(
+                                n.desc,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    // 兜底：老格式只有 desc
+                    vm.updateInfo?.desc?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text("更新说明：$it", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
             // 备用通道：直接用系统浏览器下载 APK（大包或应用内下载异常时可用）
             // 🔴 v5.7.3：用**永久短链**，不用 updateInfo.url（那个是快照，可能指向旧包）
@@ -403,7 +442,7 @@ fun SettingsScreen(vm: SettingsViewModel, onLogout: () -> Unit) {
                     Text("未找到已配对设备，请在系统设置中先配对打印机", style = MaterialTheme.typography.labelSmall)
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
-                        items(vm.paired) { d ->
+                        items(vm.paired, key = { it.address ?: it.name }) { d ->
                             Row(Modifier.fillMaxWidth().clickable(enabled = !vm.connecting) { scope.launch { vm.connect(ctx, d) } }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Text(d.name, Modifier.weight(1f))
                                 if (vm.connecting) {

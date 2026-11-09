@@ -325,7 +325,7 @@ fun SimplePickerDialog(
                 )
                 Spacer(Modifier.height(8.dp))
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
-                    items(filtered) { idx ->
+                    items(filtered, key = { it }) { idx ->
                         Text(
                             options[idx],
                             Modifier.fillMaxWidth().clickable { onPick(idx) }.padding(10.dp),
@@ -401,7 +401,7 @@ fun OcrResultDialog(
         title = { Text("生成完成：成功 $ok / ${results.size}") },
         text = {
             LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
-                items(results) { r ->
+                items(results, key = { it.hashCode() }) { r ->
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically

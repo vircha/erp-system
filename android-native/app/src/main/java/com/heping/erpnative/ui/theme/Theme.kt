@@ -44,6 +44,12 @@ private val Light = lightColorScheme(
     onSurface = Color(0xFF26215C),
     surfaceVariant = Color(0xFFEEEDFE),
     onSurfaceVariant = Color(0xFF5A5470),
+    // 🔴 v5.7.16：必须显式定义 surfaceContainer —— 材料3 的 NavigationBar 底色默认取它。
+    //    不定义时会落到 M3 baseline 的中性灰紫（跟本主题的紫调不搭），
+    //    跟底部系统导航栏区域一对不上就出现「上紫下灰」的接缝。
+    surfaceContainer = Color(0xFFF2EFFB),
+    surfaceContainerHigh = Color(0xFFEDE9F8),
+    surfaceContainerLow = Color(0xFFF7F5FD),
     outline = Color(0xFFC9C0D9),
     error = Color(0xFFA32D2D),
     onError = Color(0xFFFFFFFF)
@@ -64,6 +70,10 @@ private val Dark = darkColorScheme(
     onSurface = Color(0xFFE9E6F2),
     surfaceVariant = Color(0xFF332C52),
     onSurfaceVariant = Color(0xFFC9C0D9),
+    // 🔴 v5.7.16：深色下同样显式定义（见浅色注释），否则底部导航栏比宫格页偏灰
+    surfaceContainer = Color(0xFF241F3D),
+    surfaceContainerHigh = Color(0xFF2C2748),
+    surfaceContainerLow = Color(0xFF1F1B33),
     outline = Color(0xFF5A5470),
     error = Color(0xFFF09595),
     onError = Color(0xFF501313)
@@ -83,8 +93,8 @@ private val ErpShapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
     small = RoundedCornerShape(12.dp),
     medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(20.dp),
-    extraLarge = RoundedCornerShape(28.dp)
+    large = RoundedCornerShape(24.dp),
+    extraLarge = RoundedCornerShape(24.dp)
 )
 
 /** 运行时主题状态：改它即可让整个 App 实时换肤（MainActivity 的 setContent 读取本状态） */

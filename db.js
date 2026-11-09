@@ -438,6 +438,14 @@ try {
   // pack_size = 每箱装量（件数 = EA ÷ pack_size）。0 / NULL = 未维护，
   // 此时件数列留空而不是算成 0，避免「0 件」被误当成真实数字。
   ensureColumn('products', 'pack_size', 'pack_size INTEGER DEFAULT 0');
+  // ---- 商品图片（2026-11-07 加）----
+  // 存**相对 URL**（如 /uploads/products/p12_1730000000000.jpg），
+  // 不存绝对地址 —— 换域名/加反代前缀时不用改数据。
+  // 空串 = 没有图片，App 端显示默认占位图（不要用 NULL 判定，老数据是 NULL）。
+  ensureColumn('products', 'image', "image TEXT DEFAULT ''");
+  // 🔴 2026-11-08 注册审核：approved=0 表示「待管理员审核」，不能登录。
+  //    老账号默认 1（已通过），避免升级后把现有用户全锁死。
+  ensureColumn('accounts', 'approved', 'approved INTEGER DEFAULT 1');
   ensureColumn('order_items', 'cost', 'cost REAL DEFAULT 0');
   // ---- 单品折扣（2026-10-14 加）：有的单品有折扣，有的没有 ----
   // discount   = 该明细行的单品折扣率（1 = 不打折，0.95 = 打 95%）

@@ -85,7 +85,7 @@ fun BookManageDialog(
     ) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(Modifier.fillMaxSize()) {
-                TopBar("账套管理")
+                TopBar("账套管理", statusInset = true)
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth().padding(horizontal = 14.dp),
                     contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp),

@@ -86,6 +86,11 @@
           <button id="tab-login" class="btn-sm" style="flex:1">登录</button>
           <button id="tab-reg" class="btn-sm gray" style="flex:1">注册账户</button>
         </div>
+        <!-- 🔴 2026-11-09 注册账号类型：邮箱（默认，验证后即时可用）/ 手机号（需管理员审核） -->
+        <div id="reg-acct-type" class="row hidden" style="gap:8px;margin-bottom:8px">
+          <button type="button" id="reg-type-email" class="btn-sm">邮箱注册</button>
+          <button type="button" id="reg-type-phone" class="btn-sm gray">手机号注册</button>
+        </div>
         <input id="login-user" placeholder="账号（手机号）" autocomplete="off" />
         <input id="login-pwd" type="password" placeholder="密码" autocomplete="off" style="margin-top:10px" />
         <div id="captcha-row" class="row hidden" style="gap:8px;margin-top:10px;align-items:center">
@@ -98,10 +103,29 @@
         </label>
         <div id="reg-fields" class="hidden">
           <input id="login-name" placeholder="姓名（可选）" autocomplete="off" style="margin-top:10px" />
-          <label style="margin-top:10px">选择套账（选「新建」则创建自己的套账并成为老板）</label>
-          <select id="login-book" style="margin-top:6px"></select>
-          <input id="login-joinpwd" placeholder="套账加入口令 / 老板分享的邀请码" autocomplete="off" style="margin-top:8px" class="hidden" />
-          <input id="login-bookname" placeholder="新套账名称（如：示例套账）" autocomplete="off" style="margin-top:8px" />
+          <!-- 🔴🔴 2026-11-07 隐私修复：原来这里是「选择套账」下拉框，数据来自**无需登录**的
+               /api/books/public —— 等于把所有客户的套账名称公开挂在注册页上。
+               现在彻底移除列表，加入套账只认「邀请码」，由老板私下发给员工。 -->
+          <div class="row" style="gap:8px;margin-top:10px">
+            <button type="button" id="reg-mode-new" class="btn-sm" style="flex:1">新建套账</button>
+            <button type="button" id="reg-mode-join" class="btn-sm gray" style="flex:1">用邀请码加入</button>
+          </div>
+          <input id="login-bookname" placeholder="新套账名称（自己起名，如：XX贸易）" autocomplete="off" style="margin-top:8px" />
+          <input id="login-invite" placeholder="邀请码（向该套账老板索取）" autocomplete="off" style="margin-top:8px" class="hidden" />
+          <!-- 🔴 2026-11-09 邮箱验证码（注册主通道） -->
+          <div id="reg-email-row" class="row hidden" style="gap:8px;margin-top:8px;align-items:center">
+            <input id="login-email-code" placeholder="邮箱验证码" autocomplete="off" inputmode="numeric" maxlength="6" style="flex:1;margin:0"/>
+            <button type="button" id="reg-email-btn" class="btn-sm gray" style="flex:0 0 auto;white-space:nowrap">获取验证码</button>
+          </div>
+          <p id="reg-phone-hint" class="muted hidden" style="font-size:12px;margin:8px 0 0;line-height:1.5;color:#b45309">
+            手机号注册提交后需<b>管理员审核通过</b>才能登录。
+          </p>
+          <!-- 🔴 2026-11-08 短信验证码：只有服务端开了短信通道才显示（/api/sms/status 决定） -->
+          <div id="reg-sms-row" class="row hidden" style="gap:8px;margin-top:8px;align-items:center">
+            <input id="login-sms" placeholder="短信验证码" autocomplete="off" inputmode="numeric" maxlength="6" style="flex:1;margin:0"/>
+            <button type="button" id="reg-sms-btn" class="btn-sm gray" style="flex:0 0 auto;white-space:nowrap">获取验证码</button>
+          </div>
+          <p class="muted" id="reg-hint" style="font-size:12px;margin-top:6px;line-height:1.5">新建后你就是该套账的老板，可自行添加商品和员工。</p>
         </div>
         <button id="login-btn" class="btn-primary" style="margin-top:14px">登录</button>
         <p id="login-err" class="err"></p>

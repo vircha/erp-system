@@ -1,6 +1,8 @@
 package com.heping.erpnative.ui.main
 
 import androidx.compose.foundation.layout.*
+import com.heping.erpnative.ui.components.fadeThrough
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -151,8 +153,30 @@ fun MainScreen(onLogout: () -> Unit) {
     }
 
     Scaffold(
+        // 🔴🔴 v6.0.1：外层 Scaffold **不再吃系统栏内边距**。
+        //   原因：如果由它统一让出状态栏，顶栏 Surface 就画不到状态栏下面 →
+        //   状态栏区域露出页面底色、顶栏是白色，中间出现一条色差带（"颜色不一样"）。
+        //   现在改为：顶栏自己的 Surface 延伸到状态栏下方（内部 statusBarsPadding），
+        //   这样状态栏与顶栏**同一块背景**，颜色天然一致。
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            NavigationBar {
+            // 🔴🔴 v6.0（targetSdk 36）底部色差的**终解**：
+            //   边到边之后，系统不再替我们画导航栏区域，整块屏幕都由 App 自己绘制。
+            //   NavigationBar 带 windowInsets（自动吃掉系统手势区高度），
+            //   于是它会把**含手势区在内的整条底部**涂成 containerColor ——
+            //   上下同一个组件、同一个色值，物理上不存在接缝。
+            //   仍然保留 tonalElevation = 0：否则 M3 会再叠一层 primary 混色而偏亮。
+            // 🔴 v6.0.2：底色与页面/窗口底一致 → 导航栏与下方手势区**同一颜色**，
+            //   彻底消除「底部那条颜色不一样」。上面加一条细线做视觉分隔。
+            Column {
+            androidx.compose.material3.HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+            )
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.background,
+                tonalElevation = 0.dp
+            ) {
                 visibleTabs().forEach { t ->
                     NavigationBarItem(
                         selected = tab == t,
@@ -165,10 +189,20 @@ fun MainScreen(onLogout: () -> Unit) {
                     )
                 }
             }
+            }
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            when (tab) {
+            // 🔴 v6.0：Tab 之间用**淡入淡出**（300ms）。
+            //    同级页面不该有左右方向感 —— 那是「前进/后退」的语义，用错会误导。
+            //    AnimatedContent 用 tab 作 key，切页时旧页淡出、新页淡入，不再硬切。
+            AnimatedContent(
+                targetState = tab,
+                transitionSpec = { fadeThrough() },
+                label = "tabSwitch",
+                modifier = Modifier.fillMaxSize()
+            ) { cur ->
+            when (cur) {
                 Tab.Func -> FuncScreen(onPick = { picked -> goTo(picked) })
                 Tab.Funds -> FundsScreen(onBack = { tab = Tab.Func; backStack = emptyList() })
                 Tab.Commission -> CommissionScreen(onBack = { tab = Tab.Func; backStack = emptyList() })
@@ -189,12 +223,13 @@ fun MainScreen(onLogout: () -> Unit) {
                 Tab.Purchase -> PurchaseScreen(vm = purchaseVm,
                     onBack = { tab = Tab.Func; backStack = emptyList() })
             }
+            }
             // 🔴 气泡放 content 内最后绘制 → 盖在页面内容之上；避开底部导航栏
             backToast?.let { msg ->
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
                     Surface(
                         color = MaterialTheme.colorScheme.inverseSurface,
-                        shape = RoundedCornerShape(20.dp),
+                        shape = RoundedCornerShape(24.dp),
                         modifier = Modifier.padding(bottom = 16.dp)
                     ) {
                         Text(msg, color = MaterialTheme.colorScheme.inverseOnSurface,

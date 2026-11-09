@@ -1,0 +1,6 @@
+<resources>
+    <!-- 🔴 v6.0.1：窗口底色必须与 Compose 的背景色一致。
+         原来用平台 DeviceDefault 主题 → 窗口底是**白色**，
+         一旦系统栏区域没有完全被内容盖住，就会露出白色条带（"顶上/下面空白"）。 -->
+    <color name="erp_window_bg">#FAF8FD</color>
+</resources>

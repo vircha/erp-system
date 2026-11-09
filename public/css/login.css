@@ -404,3 +404,14 @@
 @media (prefers-reduced-motion:reduce){
   .lp-dlbar-btn{transition:none;}
 }
+
+/* 🔴🔴 2026-11-07 修「注册区颜色冲突」：
+   .lp-cardglow 是一层绝对定位的绿色径向渐变（品牌辉光），会盖在**没有定位**的
+   内容之上。原来只有 input / h1 / .muted / .lp-tabs 单独写了 position:relative，
+   于是新加的「新建套账 / 用邀请码加入」按钮行和 #reg-fields 没有定位 →
+   被辉光蒙上一层绿，出现一块一块的色差。
+   统一规则：辉光固定在最底层，卡片里除它以外的直接子元素一律提到上层。 */
+.lp-cardglow{z-index:0;}
+.lp-card > *:not(.lp-cardglow){position:relative;z-index:1;}
+/* 注册区内部的所有块级容器也要抬起来（嵌套的 .row / 提示文字） */
+#reg-fields,#reg-fields > *{position:relative;z-index:1;}

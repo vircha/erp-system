@@ -1,6 +1,7 @@
 package com.heping.erpnative.ui.main
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
@@ -34,13 +35,13 @@ fun MyArScreen(arVm: ArViewModel) {
     }
 
     if (!SessionStore.isCustomer) {
-        Box(Modifier.fillMaxSize().padding(16.dp)) {
+        Box(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp)) {
             Text("该页面仅客户账号可用")
         }
         return
     }
     if (cid <= 0) {
-        Box(Modifier.fillMaxSize().padding(16.dp)) {
+        Box(Modifier.fillMaxSize().statusBarsPadding().padding(16.dp)) {
             Text("账号尚未绑定门店，请联系商家开通")
         }
         return
@@ -50,7 +51,7 @@ fun MyArScreen(arVm: ArViewModel) {
     val rc = unsettled?.returnCredit ?: 0.0
     val rows = unsettled?.orders ?: emptyList()
 
-    LazyColumn(Modifier.fillMaxSize().padding(12.dp)) {
+    LazyColumn(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         item {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
@@ -96,7 +97,7 @@ fun MyArScreen(arVm: ArViewModel) {
         if (rows.isEmpty()) {
             item { Text("暂无未结单据", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         } else {
-            items(rows) { o ->
+            items(rows, key = { it.orderNo }) { o ->
                 Card(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                     Column(Modifier.padding(12.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

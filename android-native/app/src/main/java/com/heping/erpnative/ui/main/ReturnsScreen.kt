@@ -37,7 +37,7 @@ fun ReturnsScreen(vm: ReturnsViewModel) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("暂无退货单") }
         } else {
             LazyColumn(contentPadding = PaddingValues(8.dp)) {
-                items(vm.returns) { o ->
+                items(vm.returns, key = { it.id }) { o ->
                     Card(
                         Modifier.fillMaxWidth().padding(4.dp).clickable { vm.loadDetail(o.id) }
                     ) {

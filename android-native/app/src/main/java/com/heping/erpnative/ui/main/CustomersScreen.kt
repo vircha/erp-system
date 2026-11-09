@@ -145,7 +145,7 @@ fun CustomersScreen(vm: CustomersViewModel, arVm: ArViewModel, onBack: () -> Uni
             CenteredMessage(if (query.isNotBlank()) "无匹配门店（试试少输几个字，或用空格拆关键词）" else "暂无客户")
         } else {
             LazyColumn(contentPadding = PaddingValues(8.dp)) {
-                items(shown) { c ->
+                items(shown, key = { it.id }) { c ->
                     CustomerCard(
                         c = c, query = query, canEdit = canEdit, canArEdit = canArEdit,
                         ar = if (canAr) arById[c.id] else null,

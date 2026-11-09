@@ -63,6 +63,40 @@ function hasResource(kind, name) {
     const base = path.join(ROOT, e.name, name);
     if (exts.some((x) => fs.existsSync(base + x))) return true;
   }
+
+  // 🔴🔴 2026-11-07 补：values/ 里的资源不是「文件名=资源名」，而是
+  //   <color name="x"> / <string name="x"> 这样的声明。
+  //   原实现只找文件，于是 @color/erp_window_bg 这类**合法**引用被误报成缺失，
+  //   白白卡住构建。这里补上对 values*/ 的声明扫描。
+  // 用字面量正则 + 'g'：String.prototype.matchAll 要求全局标志，
+  // 且拼接字符串会让 \s \b 这类转义被吃掉（踩过）
+  const declRx = new RegExp(
+    '<\\s*' + kind + '\\b[^>]*\\bname\\s*=\\s*"([^"]+)"',
+    'g'
+  );
+  for (const e of dirs) {
+    if (!e.isDirectory()) continue;
+    if (e.name !== 'values' && !e.name.startsWith('values-')) continue;
+    const vdir = path.join(ROOT, e.name);
+    let vfiles = [];
+    try {
+      vfiles = fs.readdirSync(vdir);
+    } catch {
+      continue;
+    }
+    for (const vf of vfiles) {
+      if (!vf.endsWith('.xml')) continue;
+      let vtxt = '';
+      try {
+        vtxt = fs.readFileSync(path.join(vdir, vf), 'utf8');
+      } catch {
+        continue;
+      }
+      for (const m of vtxt.matchAll(declRx)) {
+        if (m[1] === name) return true;
+      }
+    }
+  }
   return false;
 }
 

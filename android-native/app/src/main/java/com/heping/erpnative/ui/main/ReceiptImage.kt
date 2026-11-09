@@ -2,6 +2,7 @@
 
 package com.heping.erpnative.ui.main
 
+import com.heping.erpnative.ui.theme.ErpColors
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -445,7 +446,7 @@ fun ReceiptPreviewDialog(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color(0xFF000000).copy(alpha = 0.6f))
+                .background(ErpColors.imageScrim)
                 // 点击暗区也能关闭，符合预期
                 .clickable(onClick = onDismiss),
             contentAlignment = Alignment.Center

@@ -71,7 +71,7 @@ private fun TagChip(text: String, color: Color) {
         fontWeight = FontWeight.Medium,
         modifier = Modifier
             .padding(top = 2.dp)
-            .background(color.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
             .padding(horizontal = 5.dp, vertical = 1.dp)
     )
 }

@@ -2,6 +2,7 @@
 
 package com.heping.erpnative.ui.main
 
+import com.heping.erpnative.ui.theme.ErpColors
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -152,7 +153,7 @@ private fun CameraPreview(onBarcode: (String, Int) -> Unit) {
         Modifier
             .fillMaxWidth()
             .height(260.dp)
-            .background(Color.Black, RoundedCornerShape(10.dp))
+            .background(Color.Black, RoundedCornerShape(12.dp))
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -205,7 +206,7 @@ private fun CameraPreview(onBarcode: (String, Int) -> Unit) {
                 .align(Alignment.Center)
                 .fillMaxWidth(0.78f)
                 .height(96.dp)
-                .border(2.dp, Color(0xFF1AAD19), RoundedCornerShape(6.dp))
+                .border(2.dp, ErpColors.scannerFrame, RoundedCornerShape(8.dp))
         )
         Row(
             Modifier

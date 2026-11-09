@@ -453,7 +453,7 @@ private fun MiniStat(label: String, value: String, modifier: Modifier = Modifier
     Column(
         modifier.background(
             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-            RoundedCornerShape(6.dp)
+            RoundedCornerShape(8.dp)
         ).padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -737,7 +737,7 @@ private fun NewPurchaseDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(Modifier.fillMaxWidth().fillMaxHeight(0.92f), shape = RoundedCornerShape(14.dp)) {
+        Surface(Modifier.fillMaxWidth().fillMaxHeight(0.92f), shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.padding(14.dp)) {
                 Text("新建采购单（提交即入库）", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
@@ -969,7 +969,7 @@ private fun PickProductsDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(Modifier.fillMaxWidth().fillMaxHeight(0.94f), shape = RoundedCornerShape(14.dp)) {
+        Surface(Modifier.fillMaxWidth().fillMaxHeight(0.94f), shape = RoundedCornerShape(12.dp)) {
             Column(Modifier.padding(12.dp)) {
                 Text("选择商品（可多选 · 可直接填数量）", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))

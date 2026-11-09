@@ -1,3 +1,37 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.ErpNative" parent="android:Theme.DeviceDefault.NoActionBar" />
+    <!--
+      🔴🔴 v6.0.1 边到边修复（「顶部/底部空白、颜色不一样」的根治）
+
+      原来的问题：
+        父主题是平台的 Theme.DeviceDefault.NoActionBar，它自带
+          · 白色 windowBackground
+          · 不透明的 statusBarColor / navigationBarColor
+        只在代码里调 enableEdgeToEdge() 是不够的：
+          · 窗口底是白的，系统栏没被内容盖住的地方就露白 → 看着就是「空白条」
+          · 部分 ROM 会强制给状态栏刷一层不透明底色 → 和页面色不一致
+          · 刘海屏未声明 shortEdges → 顶部留出一条刘海带
+
+      现在的做法（主题层一次性定死，不依赖运行时）：
+        1) windowBackground 用与 Compose 相同的底色（浅色 #FAF8FD / 深色 #1A1729）
+        2) 状态栏、导航栏都设为**透明**
+        3) 关闭系统对比度强制（scrim）—— 否则 Android 10+ 会给透明导航栏蒙一层半透明灰，
+           这正是「底部颜色和上面不一样」的直接原因
+        4) 内容延伸到刘海区域（shortEdges）
+        5) 图标明暗由代码按主题动态切（MainActivity 里的 isAppearanceLight*）
+    -->
+    <style name="Theme.ErpNative" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/erp_window_bg</item>
+
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+
+        <!-- 🔴 Android 10+ 默认给透明导航栏加「对比度保障」灰蒙层 → 必须关掉 -->
+        <item name="android:enforceStatusBarContrast" tools:targetApi="29">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="29">false</item>
+
+        <!-- 🔴 让内容延伸到刘海/挖孔区域，消掉顶部那条白带 -->
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>
+
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
 </resources>

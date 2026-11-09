@@ -115,7 +115,7 @@ fun FundsScreen(onBack: () -> Unit) {
                     }
                 } else {
                     LazyColumn {
-                        items(d.rows) { r ->
+                        items(d.rows, key = { it.id }) { r ->
                             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                                 Row(Modifier.padding(12.dp).fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween) {
@@ -251,7 +251,8 @@ fun CommissionScreen(onBack: () -> Unit) {
     }
     LaunchedEffect(Unit) { load() }
 
-    Scaffold(topBar = {
+    Scaffold(
+        topBar = {
         TopAppBar(title = { Text(if (canAll) "员工提成" else "我的提成") },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "返回") } })
     }) { pad ->
@@ -302,7 +303,7 @@ fun CommissionScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 all?.let { a ->
                     LazyColumn {
-                        items(a.people) { p ->
+                        items(a.people, key = { it.id ?: it.name }) { p ->
                             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                                 Row(Modifier.padding(12.dp).fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -354,7 +355,7 @@ fun CommissionScreen(onBack: () -> Unit) {
                     Text("每日汇总", fontSize = 13.sp, fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     LazyColumn {
-                        items(m.days) { d ->
+                        items(m.days, key = { it.date }) { d ->
                             Card(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                                 Row(Modifier.padding(11.dp).fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -375,7 +376,7 @@ fun CommissionScreen(onBack: () -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 12.dp, bottom = 4.dp))
                         }
-                        items(m.orders) { o ->
+                        items(m.orders, key = { it.orderNo }) { o ->
                             Card(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                                 Row(Modifier.padding(11.dp).fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,

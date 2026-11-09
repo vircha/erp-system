@@ -2,6 +2,7 @@
 
 package com.heping.erpnative.ui.main
 
+import com.heping.erpnative.ui.theme.ErpColors
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -340,10 +341,10 @@ fun OrdersScreen(
                         val fromCust = o.isCustomerSelfOrder()
                         Card(
                             Modifier.fillMaxWidth().then(custCardBar(fromCust)),
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                             colors = if (fromCust)
                                 androidx.compose.material3.CardDefaults.cardColors(
-                                    containerColor = Color(0xFF8A4FD3).copy(alpha = 0.05f)
+                                    containerColor = ErpColors.customerTag.copy(alpha = 0.05f)
                                 )
                             else androidx.compose.material3.CardDefaults.cardColors()
                         ) {
@@ -521,7 +522,7 @@ fun OrderDetailDialog(
                 HorizontalDivider()
                 // 🔥 2026-10-15：高度从 260 压到 200，给底下的按钮条腾地方（按钮四行时被挡）
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
-                    items(detail.items) { it ->
+                    items(detail.items, key = { it.id }) { it ->
                         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                             Column(Modifier.weight(1f)) {
                                 Text(it.productName, style = MaterialTheme.typography.bodyMedium)
@@ -755,7 +756,7 @@ private fun SelectOrderRow(
 ) {
     Card(
         Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onToggle() },
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp)
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)
     ) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = checked, onCheckedChange = { onToggle() })

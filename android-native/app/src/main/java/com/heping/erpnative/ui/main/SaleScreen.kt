@@ -1,5 +1,6 @@
 package com.heping.erpnative.ui.main
 
+import com.heping.erpnative.ui.theme.ErpColors
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -68,7 +69,8 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
     var printing by remember { mutableStateOf(false) }
     var printingOrderId by remember { mutableStateOf(-1) }
     var moreMenu by remember { mutableStateOf(false) }        // 更多录入方式菜单（模板/导入/图片）
-    var browseProducts by remember { mutableStateOf(false) }  // 未输入关键词时是否展开商品列表
+    // 🔴 v6.0.2：改为**抽屉式**浏览（原先是搜索框下面挤一个 150dp 小列表）
+    var showBrowseSheet by remember { mutableStateOf(false) }
     var detailIdx by remember { mutableStateOf<Int?>(null) }  // 购物车明细弹窗（改数量/单价/删除）
     // 单据模式存在 ViewModel 里（切换时要清空购物车/客户，UI 自己持有管不住）
     val mode = vm.mode
@@ -170,7 +172,7 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                         Text(
                             vm.printHint,
                             fontSize = 12.sp,
-                            color = if (vm.printOk) Color(0xFF2E7D32) else Color(0xFFC62828)
+                            color = if (vm.printOk) ErpColors.success else ErpColors.danger
                         )
                     }
                 }
@@ -388,8 +390,8 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
-                                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(7.dp))
-                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(7.dp))
+                                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
                                     .padding(horizontal = 8.dp, vertical = 5.dp)
                             )
                         }
@@ -472,14 +474,15 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
         val histCount = remember(vm.products, hasHistory) {
             if (!hasHistory) 0 else vm.products.count { vm.hasStorePrice(it.id) }
         }
-        val listOpen = productQuery.isNotBlank() || browseProducts
+        // 内联列表只在「有搜索词」时出现；「浏览」走抽屉，不再挤在这里
+        val listOpen = productQuery.isNotBlank()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 Modifier.weight(1f).height(40.dp)
-                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
                     .padding(horizontal = 10.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
@@ -494,7 +497,7 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                 }
                 BasicTextField(
                     value = productQuery,
-                    onValueChange = { productQuery = it; if (it.isNotBlank()) browseProducts = false },
+                    onValueChange = { productQuery = it },
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
                     modifier = Modifier.fillMaxWidth()
@@ -503,10 +506,10 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             if (productQuery.isBlank()) {
                 Spacer(Modifier.width(4.dp))
                 OutlinedButton(
-                    onClick = { browseProducts = !browseProducts },
+                    onClick = { showBrowseSheet = true },
                     modifier = Modifier.height(40.dp).width(54.dp),
                     contentPadding = PaddingValues(0.dp)
-                ) { Text(if (browseProducts) "收起" else "浏览", fontSize = 12.sp) }
+                ) { Text("浏览", fontSize = 12.sp) }
             }
         }
         if (listOpen) {
@@ -529,7 +532,7 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 150.dp).padding(horizontal = 8.dp)
             ) {
-                items(shownProducts) { p ->
+                items(shownProducts, key = { it.id }) { p ->
                     Row(
                         Modifier.fillMaxWidth().clickable { vm.addToCart(p) }
                             .padding(start = 8.dp, top = 2.dp, bottom = 2.dp),
@@ -550,6 +553,18 @@ fun SaleScreen(vm: SaleViewModel, onEditingDone: () -> Unit = {}) {
                     HorizontalDivider()
                 }
             }
+        }
+
+        // 🔴 v6.0.2 商品浏览抽屉（管家婆式九宫格带图）。
+        //   放在这里而不是页面最外层：抽屉是「当前开单的上下文」，必须在同一棵组合树里，
+        //   才能直接拿到 vm 的购物车状态。
+        if (showBrowseSheet) {
+            ProductBrowseSheet(
+                products = vm.products,
+                cartCount = vm.cart.size,
+                onPick = { vm.addToCart(it) },
+                onDismiss = { showBrowseSheet = false }
+            )
         }
 
         // 购物车：每个商品只占一行（名称/单价×数量=小计 + 步进 + 删除），点名称可改单价
@@ -970,7 +985,7 @@ private fun CustomerPicker(
                 if (q.isNotBlank()) Text("匹配 ${filtered.size} 家", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
                 Spacer(Modifier.height(8.dp))
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
-                    items(filtered) { c ->
+                    items(filtered, key = { it.id }) { c ->
                         Row(Modifier.fillMaxWidth().clickable { onPick(c) }.padding(10.dp)) {
                             Column {
                                 HighlightText(c.name, q, style = MaterialTheme.typography.bodyLarge)
@@ -1008,7 +1023,7 @@ private fun StorePickerDialog(
                 )
                 Spacer(Modifier.height(8.dp))
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
-                    items(stores) { c ->
+                    items(stores, key = { it.id }) { c ->
                         // 🔴 2026-10-20 卡片化：原来靠店名前拼一个 "✅ " emoji 标当前项。
                         //    emoji 字形在各系统/各字号下都不一样，对不齐也不够醒目 →
                         //    改成主色描边 + 右上角「当前」文字 pill（跟网页版 .store-switch-item 一致）。
@@ -1016,13 +1031,13 @@ private fun StorePickerDialog(
                         Row(
                             Modifier.fillMaxWidth()
                                 .padding(vertical = 3.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(if (on) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
                                             else MaterialTheme.colorScheme.surface)
                                 .border(
                                     if (on) 1.5.dp else 1.dp,
                                     if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                                    RoundedCornerShape(10.dp)
+                                    RoundedCornerShape(12.dp)
                                 )
                                 .clickable { if (!on) onPick(c) }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1041,7 +1056,7 @@ private fun StorePickerDialog(
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onPrimary,
                                     modifier = Modifier
-                                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(20.dp))
+                                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(24.dp))
                                         .padding(horizontal = 7.dp, vertical = 3.dp)
                                 )
                             } else {
@@ -1070,7 +1085,7 @@ private fun ReturnPickerDialog(
                 Text("近 30 天暂无可退订单")
             } else {
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
-                    items(orders) { o ->
+                    items(orders, key = { it.id }) { o ->
                         Row(
                             Modifier.fillMaxWidth().clickable { onPick(o) }.padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically

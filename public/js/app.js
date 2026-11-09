@@ -222,19 +222,130 @@
 
   // ---------- 登录 / 注册 / 登出 ----------
   let REG_MODE = false;
-  async function loadPublicBooks() {
-    try {
-      const books = await API.req('GET', '/api/books/public');
-      const sel = $('#login-book'); if (!sel) return;
-      sel.innerHTML = '<option value="">＋ 新建套账（成为老板）</option>' +
-        books.map(b => `<option value="${b.id}">加入：${esc(b.name)}</option>`).join('');
-      sel.onchange = () => {
-        const joining = !!sel.value;
-        $('#login-bookname').classList.toggle('hidden', joining);
-        $('#login-joinpwd').classList.toggle('hidden', !joining);
-      };
-    } catch (e) {}
+  // 🔴🔴 2026-11-07 隐私修复：删掉 loadPublicBooks() 与 /api/books/public 调用。
+  //   原来注册页会拉「全部套账名称」做下拉，等于把客户名录公开；
+  //   现在加入套账只认邀请码，前端**完全不知道**有哪些套账。
+  let REG_JOIN = false;   // false=新建套账  true=用邀请码加入
+  function setRegJoinMode(join) {
+    REG_JOIN = join;
+    $('#reg-mode-new').className = 'btn-sm' + (join ? ' gray' : '');
+    $('#reg-mode-join').className = 'btn-sm' + (join ? '' : ' gray');
+    $('#login-bookname').classList.toggle('hidden', join);
+    $('#login-invite').classList.toggle('hidden', !join);
+    $('#reg-hint').textContent = join
+      ? '输入老板给你的邀请码，注册后自动加入对应套账（角色为员工，可由老板调整）。'
+      : '新建后你就是该套账的老板，可自行添加商品和员工。';
   }
+  function bindRegModeButtons() {
+    const a = $('#reg-mode-new'), b = $('#reg-mode-join');
+    if (a) a.onclick = () => setRegJoinMode(false);
+    if (b) b.onclick = () => setRegJoinMode(true);
+  }
+
+  // ---------- 注册账号类型：邮箱（默认）/ 手机号（2026-11-09）----------
+  let REG_EMAIL = true;       // true=邮箱注册  false=手机号注册
+  let emailTimer = null;
+  function setAcctType(emailMode) {
+    REG_EMAIL = emailMode;
+    const be = $('#reg-type-email'), bp = $('#reg-type-phone');
+    if (be) be.className = 'btn-sm' + (emailMode ? '' : ' gray');
+    if (bp) bp.className = 'btn-sm' + (emailMode ? ' gray' : '');
+    const u = $('#login-user');
+    if (u) {
+      if (emailMode) {
+        u.placeholder = '邮箱地址';
+        u.removeAttribute('inputmode');
+        u.setAttribute('maxlength', '64');
+        u.type = 'email';
+      } else {
+        u.placeholder = '手机号（11 位）';
+        u.setAttribute('inputmode', 'numeric');
+        u.setAttribute('maxlength', '11');
+        u.type = 'text';
+      }
+    }
+    const er = $('#reg-email-row'); if (er) er.classList.toggle('hidden', !emailMode);
+    const ph = $('#reg-phone-hint'); if (ph) ph.classList.toggle('hidden', emailMode);
+    const sr = $('#reg-sms-row'); if (sr) sr.classList.toggle('hidden', emailMode || !SMS_REQUIRED);
+  }
+  function startEmailCountdown(sec) {
+    const btn = $('#reg-email-btn'); if (!btn) return;
+    let left = sec;
+    btn.disabled = true; btn.textContent = left + 's 后重发';
+    if (emailTimer) clearInterval(emailTimer);
+    emailTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) { clearInterval(emailTimer); emailTimer = null; btn.disabled = false; btn.textContent = '获取验证码'; }
+      else btn.textContent = left + 's 后重发';
+    }, 1000);
+  }
+  async function sendEmailCode() {
+    const email = ($('#login-user').value || '').trim();
+    const captcha = $('#login-captcha') ? $('#login-captcha').value.trim() : '';
+    $('#login-err').textContent = '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) { $('#login-err').textContent = '请先填写正确的邮箱地址'; return; }
+    if (!captcha) { $('#login-err').textContent = '请先填写图形验证码'; return; }
+    const btn = $('#reg-email-btn');
+    btn.disabled = true; btn.textContent = '发送中…';
+    try {
+      await API.req('POST', '/api/email/send', { email, captcha_id: CAPTCHA_ID, captcha });
+      toast('验证码已发送到邮箱，请查收（含垃圾箱）');
+      startEmailCountdown(60);
+      refreshCaptcha();
+    } catch (e) {
+      $('#login-err').textContent = e.message;
+      btn.disabled = false; btn.textContent = '获取验证码';
+      refreshCaptcha();
+    }
+  }
+
+  // ---------- 短信验证码（2026-11-08）----------
+  let SMS_REQUIRED = false;
+  let smsTimer = null;
+  async function refreshSmsAvailability() {
+    try {
+      const st = await API.req('GET', '/api/sms/status');
+      SMS_REQUIRED = !!st.required;
+    } catch (e) { SMS_REQUIRED = false; }
+    const row = $('#reg-sms-row');
+    if (row) row.classList.toggle('hidden', !SMS_REQUIRED);
+  }
+  function startSmsCountdown(sec) {
+    const btn = $('#reg-sms-btn'); if (!btn) return;
+    let left = sec;
+    btn.disabled = true;
+    btn.textContent = left + 's 后重发';
+    if (smsTimer) clearInterval(smsTimer);
+    smsTimer = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(smsTimer); smsTimer = null;
+        btn.disabled = false; btn.textContent = '获取验证码';
+      } else {
+        btn.textContent = left + 's 后重发';
+      }
+    }, 1000);
+  }
+  async function sendSmsCode() {
+    const phone = ($('#login-user').value || '').replace(/\D/g, '');
+    const captcha = $('#login-captcha') ? $('#login-captcha').value.trim() : '';
+    $('#login-err').textContent = '';
+    if (!/^1[3-9]\d{9}$/.test(phone)) { $('#login-err').textContent = '请先填写 11 位手机号'; return; }
+    if (!captcha) { $('#login-err').textContent = '请先填写图形验证码'; return; }
+    const btn = $('#reg-sms-btn');
+    btn.disabled = true; btn.textContent = '发送中…';
+    try {
+      const r = await API.req('POST', '/api/sms/send', { phone, captcha_id: CAPTCHA_ID, captcha });
+      toast(r.mock ? '已生成验证码（测试模式，见服务器日志）' : '验证码已发送');
+      startSmsCountdown(60);
+      refreshCaptcha();   // 图形码是一次性的，用掉就该换一张
+    } catch (e) {
+      $('#login-err').textContent = e.message;
+      btn.disabled = false; btn.textContent = '获取验证码';
+      refreshCaptcha();
+    }
+  }
+
   function setRegMode(on) {
     REG_MODE = on;
     $('#tab-login').className = 'btn-sm' + (on ? ' gray' : '');
@@ -243,8 +354,42 @@
     $('#login-btn').textContent = on ? '注册并进入' : '登录';
     $('#login-err').textContent = '';
     showCaptcha(on); // 注册必填验证码
-    if (on) { loadPublicBooks(); $('#login-bookname').classList.remove('hidden'); $('#login-joinpwd').classList.add('hidden'); }
+    // 🔴 注册只收手机号：切到注册时把输入框改成数字键盘并限 11 位
+    const uEl = $('#login-user');
+    if (uEl) {
+      if (on) {
+        uEl.placeholder = '手机号（11 位）';
+        uEl.setAttribute('inputmode', 'numeric');
+        uEl.setAttribute('maxlength', '11');
+      } else {
+        uEl.placeholder = '账号（手机号）';
+        uEl.removeAttribute('inputmode');
+        uEl.removeAttribute('maxlength');
+      }
+    }
+    const at = $('#reg-acct-type'); if (at) at.classList.toggle('hidden', !on);
+    if (on) { setRegJoinMode(false); refreshSmsAvailability().then(() => setAcctType(true)); }
   }
+  // 注册模式下即时过滤非数字，避免用户输入字母后才报错
+  document.addEventListener('input', (e) => {
+    if (!REG_MODE) return;
+    const el = e.target;
+    if (el && el.id === 'login-email-code') {
+      const v3 = (el.value || '').replace(/\D/g, '').slice(0, 6);
+      if (el.value !== v3) el.value = v3;
+      return;
+    }
+    if (el && el.id === 'login-sms') {
+      const v2 = (el.value || '').replace(/\D/g, '').slice(0, 6);
+      if (el.value !== v2) el.value = v2;
+      return;
+    }
+    if (el && el.id === 'login-user' && !REG_EMAIL) {
+      const v = (el.value || '').replace(/\D/g, '').slice(0, 11);
+      if (el.value !== v) el.value = v;
+    }
+  });
+
   async function doAuth() {
     const username = $('#login-user').value.trim();
     const password = $('#login-pwd').value;
@@ -252,21 +397,50 @@
     $('#login-err').textContent = '';
     if (!username || !password) { $('#login-err').textContent = '请填写账号和密码'; return; }
     if (REG_MODE && !captcha) { $('#login-err').textContent = '请填写验证码'; return; }
+    // 🔴 注册账号必须是 11 位手机号（服务端也会再校验一次，这里只是即时提示）
+    if (REG_MODE && REG_EMAIL && !($('#login-email-code') && $('#login-email-code').value.trim())) {
+      $('#login-err').textContent = '请填写邮箱验证码';
+      return;
+    }
+    if (REG_MODE && !REG_EMAIL && SMS_REQUIRED && !($('#login-sms') && $('#login-sms').value.trim())) {
+      $('#login-err').textContent = '请填写短信验证码';
+      return;
+    }
+    if (REG_MODE && REG_EMAIL && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(username)) {
+      $('#login-err').textContent = '邮箱格式不正确';
+      return;
+    }
+    if (REG_MODE && !REG_EMAIL && !/^1[3-9]\d{9}$/.test(username)) {
+      $('#login-err').textContent = '账号必须是 11 位手机号（1 开头）';
+      return;
+    }
     try {
       let d;
       const trust_device = $('#login-trust') ? $('#login-trust').checked : false;
       const device = deviceLabel();
       if (REG_MODE) {
-        const sel = $('#login-book');
+        // 🔴 不再传 book_id（客户端拿不到套账 ID 了）：
+        //   新建 → 传 book_name；加入 → 传 invite_code，由服务端反查套账。
+        const invite = ($('#login-invite').value || '').trim().toUpperCase();
+        if (REG_JOIN && !invite) { $('#login-err').textContent = '请填写邀请码'; return; }
+        if (!REG_JOIN && !$('#login-bookname').value.trim()) { $('#login-err').textContent = '请填写套账名称'; return; }
         d = await API.req('POST', '/api/register', {
           username, password, captcha_id: CAPTCHA_ID, captcha, trust_device, device,
           display_name: $('#login-name').value.trim(),
-          book_id: sel && sel.value ? Number(sel.value) : null,
-          book_name: $('#login-bookname').value.trim(),
-          join_password: $('#login-joinpwd').value
+          book_name: REG_JOIN ? '' : $('#login-bookname').value.trim(),
+          invite_code: REG_JOIN ? invite : '',
+          sms_code: ($('#login-sms') ? $('#login-sms').value.trim() : ''),
+          email_code: ($('#login-email-code') ? $('#login-email-code').value.trim() : '')
         });
       } else {
         d = await API.req('POST', '/api/login', { username, password, captcha_id: CAPTCHA_ID, captcha, trust_device, device });
+      }
+      // 🔴 注册后是「待审核」状态：服务端不发 token，这里直接回登录页并提示
+      if (d && d.pending) {
+        toast(d.message || '注册成功，等待管理员审核', 6000);
+        setRegMode(false);
+        $('#login-err').textContent = '';
+        return;
       }
       TOKEN = d.token;
       localStorage.setItem('erp_token', TOKEN);
@@ -3772,6 +3946,7 @@ if (d.trust_full) {
         <div class="erp-scroll">
           <div class="erp-thead">
             <span class="c-check"></span>
+            <span class="c-img">图片</span>
             <span class="c-code">编码</span><span class="c-name">名称</span><span class="c-spec">规格·单位</span><span class="c-price">单价</span><span class="c-qty">进价</span><span class="c-act">操作</span>
           </div>
           <div id="p-list"></div>
@@ -3794,6 +3969,32 @@ if (d.trust_full) {
     // 模糊搜索：多关键词 AND + 名称/条码/规格/单位，按相关度排序
     return fuzzyFilter(PRODUCTS, kw, p => [p.name, p.barcode, p.spec, p.unit]);
   }
+  /** 全屏看图：点商品列表里的图片触发；点任意处关闭 */
+  function zoomImage(src) {
+    if (!src) return;
+    const old = document.getElementById('img-zoom');
+    if (old) old.remove();
+    const box = document.createElement('div');
+    box.id = 'img-zoom';
+    const img = document.createElement('img');
+    img.src = src;
+    const hint = document.createElement('div');
+    hint.className = 'iz-hint';
+    hint.textContent = '点击任意处关闭';
+    box.appendChild(img);
+    box.appendChild(hint);
+    box.onclick = () => box.remove();
+    document.body.appendChild(box);
+  }
+  // 事件委托：列表是动态重绘的，不能给每个 img 单独绑定
+  document.addEventListener('click', (e) => {
+    const im = e.target.closest && e.target.closest('#p-list .c-img img');
+    if (im) { e.preventDefault(); e.stopPropagation(); zoomImage(im.dataset.src || im.src); }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { const b = document.getElementById('img-zoom'); if (b) b.remove(); }
+  });
+
   function renderProductRows(list) {
     lastProductList = list || PRODUCTS;
     const list2 = lastProductList;
@@ -3806,6 +4007,8 @@ if (d.trust_full) {
       const sel = selectedProducts.has(p.id);
       return `<div class="erp-row ${sel ? 'sel' : ''}" data-id="${p.id}">
         <span class="c-check"><input type="checkbox" class="p-chk" data-id="${p.id}" ${sel ? 'checked' : ''}/></span>
+        <!-- 🔴 图片独立列：48px，点一下全屏放大（data-src 交给全局委托处理） -->
+        <span class="c-img">${p.image ? `<img src="${esc(p.image)}" data-src="${esc(p.image)}" alt="图" loading="lazy"/>` : '<span class="noimg">无图</span>'}</span>
         <span class="c-code">${highlight(p.barcode || ('ID' + p.id), kw)}</span>
         <span class="c-name">${highlight(p.name, kw)}</span>
         <span class="c-spec">${highlight(p.spec || '', kw)}·${highlight(p.unit || '', kw)}</span>
@@ -4613,9 +4816,30 @@ if (d.trust_full) {
 
   async function editProduct(id) {
     const all = await API.req('GET', '/api/products');
-    let p = { name: '', barcode: '', spec: '', unit: '个', price: 0, cost: 0, qty: 0, low_threshold: 0, pack_size: 0 };
+    let p = { name: '', barcode: '', spec: '', unit: '个', price: 0, cost: 0, qty: 0, low_threshold: 0, pack_size: 0, image: '' };
     if (id) p = all.find(x => x.id == id) || p;
+
+    // 🔴 2026-11-07 商品图片（网页版补齐，与手机版对齐）
+    let curImage = p.image || '';       // 服务端相对地址，或本地选的 base64 dataURL
+    let pendingUpload = null;           // 需要保存后再上传的 base64
+    const origImage = p.image || '';
+    const thumb = (src) => src ? `<img id="f-img" src="${esc(src)}" style="width:84px;height:84px;object-fit:cover;border-radius:10px;border:1.5px solid #e3e8ee;background:#f4f6f8"/>`
+                              : `<div id="f-img" style="width:84px;height:84px;border-radius:10px;border:1.5px dashed #cdd6e2;background:#f4f6f8;display:flex;align-items:center;justify-content:center;font-size:11px;color:#9aa6b6">无图</div>`;
+
     showModal(id ? '编辑商品' : '新增商品', `
+      <label>商品图片</label>
+      <div style="display:flex;gap:10px;align-items:flex-start;margin:6px 0 12px">
+        <div id="f-img-box">${thumb(curImage)}</div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;gap:6px">
+            <button class="btn-sm gray" id="f-img-pick" type="button" style="flex:1">上传图片</button>
+            <button class="btn-sm gray" id="f-img-match" type="button" style="flex:1">获取同类照片</button>
+          </div>
+          <button class="btn-sm gray" id="f-img-del" type="button">删除图片</button>
+          <span class="muted" id="f-img-hint" style="font-size:11px;line-height:1.4">不添加则显示默认图。「获取同类照片」会按条码或名称自动匹配平台已上传的图。</span>
+        </div>
+      </div>
+      <input type="file" id="f-img-file" accept="image/*" style="display:none"/>
       <label>名称 *</label><input id="f-name" value="${esc(p.name)}"/>
       <label style="display:flex;align-items:center;gap:8px">条码
         <input id="f-barcode" value="${esc(p.barcode || '')}" style="flex:1;margin:0"/>
@@ -4628,13 +4852,96 @@ if (d.trust_full) {
       <label>单价（元）</label><input id="f-price" type="number" step="0.01" value="${p.price}"/>
       <label>进价（元，用于利润分析）</label><input id="f-cost" type="number" step="0.01" value="${p.cost || 0}"/>
       <button class="btn-primary" id="f-save" style="margin-top:14px">保存</button>`);
+
+    const redraw = () => { $('#f-img-box').innerHTML = thumb(curImage); };
+    const hint = (t) => { $('#f-img-hint').textContent = t; };
+
     $('#f-scan').onclick = () => scanIntoField($('#f-barcode'));
-    $('#f-save').onclick = async () => {
-      const body = { name: $('#f-name').value.trim(), barcode: $('#f-barcode').value.trim(), spec: $('#f-spec').value.trim(), unit: $('#f-unit').value.trim() || '个', price: parseFloat($('#f-price').value) || 0, cost: parseFloat($('#f-cost').value) || 0, pack_size: Math.max(0, parseInt($('#f-pack').value, 10) || 0) };
-      if (!body.name) { toast('名称必填'); return; }
-      try { const r = id ? await API.req('PUT', '/api/products/' + id, body) : await API.req('POST', '/api/products', body); closeModal(); toast('已保存'); notifyViolation(r.violation); renderProducts(); }
-      catch (e) { toast(e.message); }
+    $('#f-img-pick').onclick = () => $('#f-img-file').click();
+
+    $('#f-img-file').onchange = async (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      hint('处理中…');
+      try {
+        const dataUrl = await compressToDataUrl(f, 1024, 0.85);
+        curImage = dataUrl; pendingUpload = dataUrl; redraw();
+        hint('已选图片，保存后上传');
+      } catch (e) { hint('图片读取失败'); }
+      ev.target.value = '';
     };
+
+    $('#f-img-match').onclick = async () => {
+      const bc = ($('#f-barcode').value || '').trim();
+      const nm = ($('#f-name').value || '').trim();
+      if (!bc && !nm) { hint('请先填条码或名称'); return; }
+      hint('匹配中…');
+      try {
+        // 🔴 服务端只回本地图片地址，不透露图来自哪个账套/哪个用户
+        const r = await API.req('POST', '/api/product-image/match', { barcode: bc, name: nm, exclude_id: id || 0 });
+        if (r && r.image) {
+          curImage = r.image; pendingUpload = null; redraw();
+          hint(r.matched === 'barcode' ? '已按条码匹配到同类图片' : '已按名称匹配到同类图片');
+        } else {
+          hint('平台暂无同类图片，可手动上传');
+        }
+      } catch (e) { hint(e.message || '匹配失败'); }
+    };
+
+    $('#f-img-del').onclick = async () => {
+      curImage = ''; pendingUpload = null; redraw();
+      hint('已移除图片，保存后生效');
+    };
+
+    $('#f-save').onclick = async () => {
+      const body = {
+        name: $('#f-name').value.trim(), barcode: $('#f-barcode').value.trim(),
+        spec: $('#f-spec').value.trim(), unit: $('#f-unit').value.trim() || '个',
+        price: parseFloat($('#f-price').value) || 0, cost: parseFloat($('#f-cost').value) || 0,
+        pack_size: Math.max(0, parseInt($('#f-pack').value, 10) || 0)
+      };
+      if (!body.name) { toast('名称必填'); return; }
+      // 只把「服务端地址」放进 image；本地选的图单独上传
+      if (curImage && curImage.startsWith('/uploads/products/')) body.image = curImage;
+      else if (!curImage) body.image = '';
+      try {
+        const r = id ? await API.req('PUT', '/api/products/' + id, body)
+                     : await API.req('POST', '/api/products', body);
+        const newId = id || r.id;
+        // 本地选的图 → 保存拿到 id 后上传
+        if (pendingUpload && newId) {
+          try { await API.req('POST', '/api/products/' + newId + '/image', { data: pendingUpload }); }
+          catch (e) { toast('图片上传失败：' + e.message); }
+        }
+        // 原本有图、现在清空了 → 通知服务端删文件
+        if (!curImage && origImage && newId) {
+          try { await API.req('DELETE', '/api/products/' + newId + '/image'); } catch (e) {}
+        }
+        closeModal(); toast('已保存'); notifyViolation(r.violation); renderProducts();
+      } catch (e) { toast(e.message); }
+    };
+  }
+
+  /** 把文件压成 base64 dataURL（最长边 1024、JPEG 0.85），避免上传大图 */
+  function compressToDataUrl(file, maxPx, quality) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let { width: w, height: h } = img;
+          const longest = Math.max(w, h);
+          if (longest > maxPx) { const s = maxPx / longest; w = Math.round(w * s); h = Math.round(h * s); }
+          const cv = document.createElement('canvas');
+          cv.width = w; cv.height = h;
+          cv.getContext('2d').drawImage(img, 0, 0, w, h);
+          URL.revokeObjectURL(url);
+          resolve(cv.toDataURL('image/jpeg', quality));
+        } catch (e) { URL.revokeObjectURL(url); reject(e); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片加载失败')); };
+      img.src = url;
+    });
   }
 
   // ---------- 设置 ----------
@@ -4748,6 +5055,7 @@ if (d.trust_full) {
         <div class="section-title">平台概览</div>
         <div class="admin-stat-row">
           <div class="admin-stat"><div class="as-n">${st.total || 0}</div><div class="as-l">总账号</div></div>
+          <div class="admin-stat"><div class="as-n" style="color:#2563eb">${st.awaiting || 0}</div><div class="as-l">待审核</div></div>
           <div class="admin-stat"><div class="as-n" style="color:#d97706">${st.pending || 0}</div><div class="as-l">待整改</div></div>
           <div class="admin-stat"><div class="as-n" style="color:var(--danger)">${st.banned || 0}</div><div class="as-l">已封禁</div></div>
           <div class="admin-stat"><div class="as-n" style="color:#059669">${st.whitelisted || 0}</div><div class="as-l">白名单</div></div>
@@ -4766,15 +5074,21 @@ if (d.trust_full) {
               <td>${esc(a.username)}</td>
               <td>${esc(a.display_name || '')}</td>
               <td>${esc(a.roleLabel || a.role)}</td>
-              <td>${a.active
-                    ? '<span style="color:#059669">正常</span>'
-                    : '<span style="color:var(--danger)" title="' + esc(a.banned_reason || '') + '">已封禁</span>'}</td>
+              <td>${Number(a.approved) === 0
+                    ? '<span style="color:#2563eb;font-weight:600">待审核</span>'
+                    : (a.active
+                      ? '<span style="color:#059669">正常</span>'
+                      : '<span style="color:var(--danger)" title="' + esc(a.banned_reason || '') + '">已封禁</span>')}</td>
               <td>${a.is_admin ? '<span class="tag-admin">管理员</span>' : ''}${a.whitelisted ? '<span class="tag-wl">白名单</span>' : ''}</td>
               <td>
+                ${Number(a.approved) === 0
+                  ? '<button class="btn-sm" style="background:#2563eb" data-approve="' + a.id + '">通过</button>'
+                  : ''}
                 ${a.is_admin ? '<span class="muted">—</span>' : (a.active
                   ? '<button class="btn-sm" style="background:var(--danger)" data-ban="' + a.id + '">封禁</button>'
                   : '<button class="btn-sm" style="background:#059669" data-unban="' + a.id + '">解封</button>')}
                 ${a.is_admin ? '' : '<button class="btn-sm gray" data-wl="' + a.id + '" data-on="' + (a.whitelisted ? 1 : 0) + '">' + (a.whitelisted ? '移出白名单' : '加白名单') + '</button>'}
+                ${a.is_admin ? '' : '<button class="btn-sm" style="background:#7f1d1d" data-del="' + a.id + '" data-u="' + esc(a.username) + '">删除</button>'}
               </td>
             </tr>`).join('')}
           </tbody>
@@ -4887,6 +5201,54 @@ if (d.trust_full) {
       } catch (e) { toast(e.message); }
     });
 
+    // 审核通过
+    $$('#page [data-approve]').forEach(btn => btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = '处理中…';
+      try {
+        await API.req('POST', '/api/admin/accounts/' + btn.dataset.approve + '/approve', { pass: true });
+        toast('已通过，该账号现在可以登录了');
+        renderAdmin();
+      } catch (e) { btn.disabled = false; btn.textContent = '通过'; toast(e.message); }
+    });
+
+    // 🔴 删除账号：不可恢复，要求手输账号名确认（比 confirm() 更能防误点）
+    $$('#page [data-del]').forEach(btn => btn.onclick = () => {
+      const id = btn.dataset.del, uname = btn.dataset.u;
+      showModal('删除账号', `
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;font-size:13px;line-height:1.6;color:#991b1b">
+          将<b>永久删除</b>账号 <b>${esc(uname)}</b>：<br>
+          · 该账号所有登录会话立即失效<br>
+          · 清除其信任设备<br>
+          · 若它独占一个空套账，套账也会一并删除<br>
+          <b>此操作不可恢复。</b>
+        </div>
+        <label style="margin-top:10px">请输入账号名确认</label>
+        <input id="del-confirm" placeholder="${esc(uname)}" autocomplete="off"/>
+        <div class="row" style="gap:8px;margin-top:14px">
+          <button class="btn-sm gray" id="del-cancel" style="flex:1">取消</button>
+          <button class="btn-sm" id="del-ok" style="flex:1;background:#7f1d1d">确认删除</button>
+        </div>`);
+      $('#del-cancel').onclick = closeModal;
+      $('#del-ok').onclick = async () => {
+        const v = ($('#del-confirm').value || '').trim();
+        if (v !== uname) { toast('账号名不一致，已取消'); return; }
+        const okBtn = $('#del-ok');
+        okBtn.disabled = true; okBtn.textContent = '删除中…';
+        try {
+          const r = await API.req('DELETE', '/api/admin/accounts/' + id, {});
+          closeModal();
+          let msg = '已删除账号 ' + r.username;
+          if (r.book_deleted) msg += '，并删除了空套账';
+          else if (r.book_kept) msg += '；套账「' + r.book_kept + '」仍有业务数据，已保留';
+          toast(msg, 4000);
+          renderAdmin();
+        } catch (e) {
+          okBtn.disabled = false; okBtn.textContent = '确认删除';
+          toast(e.message);
+        }
+      };
+    });
+
     // 违规标记已整改
     $$('#page [data-vres]').forEach(btn => btn.onclick = async () => {
       if (!confirm('确认该违规内容已被整改？')) return;
@@ -4919,7 +5281,7 @@ if (d.trust_full) {
         <button class="sec-head" type="button"><span class="sec-title">📚 套账管理</span><span class="sec-arrow">▸</span></button>
         <div class="sec-body">
           <label>新增套账名称</label>
-          <div class="row" style="gap:8px"><input id="set-bookname" placeholder="如：示例套账"/><button class="btn-sm" id="set-bookadd" style="white-space:nowrap">创建</button></div>
+          <div class="row" style="gap:8px"><input id="set-bookname" placeholder="如：XX贸易"/><button class="btn-sm" id="set-bookadd" style="white-space:nowrap">创建</button></div>
           <label style="margin-top:10px">本套账加入口令（员工注册加入时需填；已加密存储，保存后不可查看）</label>
           <div class="row" style="gap:8px"><input id="set-joinpwd" type="password" placeholder="${TPL.join_password_set ? '已设置（留空不改，输入新值可重设）' : '未设置'}"/><button class="btn-sm" id="set-joinpwd-save" style="white-space:nowrap">保存</button><button class="btn-sm" id="set-joinpwd-clear" style="white-space:nowrap">清除</button></div>
           <div style="margin-top:12px;border-top:1px solid #f0f0f0;padding-top:10px">
@@ -5533,6 +5895,14 @@ if (d.trust_full) {
     $('#trusted-unbind').onclick = () => trustedUnbind();
     $('#tab-login').onclick = () => setRegMode(false);
     $('#tab-reg').onclick = () => setRegMode(true);
+    bindRegModeButtons();
+    const smsBtn = $('#reg-sms-btn');
+    if (smsBtn) smsBtn.onclick = sendSmsCode;
+    const emBtn = $('#reg-email-btn');
+    if (emBtn) emBtn.onclick = sendEmailCode;
+    const te = $('#reg-type-email'), tp = $('#reg-type-phone');
+    if (te) te.onclick = () => setAcctType(true);
+    if (tp) tp.onclick = () => setAcctType(false);
     $('#captcha-img').onclick = refreshCaptcha;
     $('#login-btn').onclick = doAuth;
     $('#login-pwd').addEventListener('keydown', e => { if (e.key === 'Enter') $('#login-btn').click(); });

@@ -22,20 +22,54 @@ class ErpNativeApp : Application() {
     // 只用来做「静默连上次那台打印机」这种一次性后台动作，打印完成即结束。
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    /**
+     * 🔴🔴 v6.0 关键修复：崩溃捕获必须装在 [attachBaseContext]，不能装在 onCreate。
+     *
+     *   Android 的启动顺序是：
+     *     ① Application.attachBaseContext()
+     *     ② **所有 ContentProvider.onCreate()**   ← ML Kit 的 MlKitInitProvider 在这里初始化
+     *     ③ Application.onCreate()
+     *
+     *   所以：任何在「原生库加载 / Provider 初始化」阶段炸掉的崩溃，
+     *   如果处理只能在 ③ 装，就永远抓不到 —— **表现正是「闪退且毫无日志」**。
+     *   装到 ① 才能覆盖整段启动期。
+     */
+    override fun attachBaseContext(base: android.content.Context) {
+        super.attachBaseContext(base)
+        installCrashHandler()
+    }
+
     override fun onCreate() {
         super.onCreate()
-        SessionStore.init(this)
-        BtPrinter.init(this)
+        // 🔴🔴 v6.0 防御式启动：每一步独立 try/catch。
+        //   原来任何一步抛异常（比如某些 ROM 上取不到蓝牙适配器、DataStore 初始化失败）
+        //   都会让整个进程崩掉，表现就是「闪退」。这里改成「哪步坏了就跳过哪步」，
+        //   把异常记进日志，App 仍能起来 —— 起来之后才谈得上修。
+        step("SessionStore.init") { SessionStore.init(this) }
+        step("BtPrinter.init") { BtPrinter.init(this) }
         // 🔴🔴 v5.7.4 离线输单：注册网络状态监听。
         //   网络由「离线 → 恢复」时自动触发一次同步（把本地排队的单传上去）。
         //   ⚠️ 必须在 SessionStore.init 之后（NetState 只需要 applicationContext）。
-        NetState.init(this)
-        observeNetworkForSync()
+        step("NetState.init") { NetState.init(this) }
+        step("observeNetworkForSync") { observeNetworkForSync() }
         // 🔴 2026-10-15 经理要求「不手动连接，点打印直接出单」：
         // 冷启动就静默连上上次用的打印机，等用户走到开单页时已经连好了。
         // warmUp 内部只在「蓝牙已开 + 有配对记录 + 未连上」时才动作，不会凭空弹配对框。
-        BtPrinter.warmUp(this, appScope)
-        installCrashHandler()
+        step("BtPrinter.warmUp") { BtPrinter.warmUp(this, appScope) }
+    }
+
+    /** 执行一步启动初始化；失败只记日志，不中断启动。 */
+    private inline fun step(name: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            try {
+                val sw = java.io.StringWriter()
+                t.printStackTrace(java.io.PrintWriter(sw))
+                File(filesDir, "crash.log").appendText("===== 启动步骤失败: $name =====\n$sw\n")
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     /**
@@ -66,16 +100,23 @@ class ErpNativeApp : Application() {
     private fun installCrashHandler() {
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            try {
-                val f = File(filesDir, "crash.log")
-                FileWriter(f, true).use { w ->
-                    w.write("===== ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())} =====\n")
-                    w.write("thread: ${t.name}\n")
-                    w.write("${e.javaClass.name}: ${e.message}\n")
-                    e.stackTrace.take(40).forEach { w.write("    at $it\n") }
-                    w.write("\n")
+            // 🔴 写两份：内部目录给「设置页查看日志」用；
+            //    外部私有目录（Android/data/<包名>/files/）可用文件管理器或 USB 直接拷出，
+            //    这样即使 App 打不开也能把堆栈取出来。两条路都留，才不会再抓瞎。
+            val targets = ArrayList<File>(2)
+            targets.add(File(filesDir, "crash.log"))
+            try { getExternalFilesDir(null)?.let { targets.add(File(it, "crash.log")) } } catch (_: Throwable) {}
+            for (f in targets) {
+                try {
+                    FileWriter(f, true).use { w ->
+                        w.write("===== ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())} =====\n")
+                        w.write("thread: ${t.name}\n")
+                        w.write("${e.javaClass.name}: ${e.message}\n")
+                        e.stackTrace.take(40).forEach { w.write("    at $it\n") }
+                        w.write("\n")
+                    }
+                } catch (_: Throwable) {
                 }
-            } catch (_: Throwable) {
             }
             prev?.uncaughtException(t, e)
         }

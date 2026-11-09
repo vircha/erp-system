@@ -1003,3 +1003,46 @@ mark{background:#fff2a8;color:inherit;padding:0 1px;border-radius:2px;}
   .me-cols{grid-template-columns:1fr;}
   .me-single{max-width:none;}
 }
+
+/* ============================================================
+   🔴 2026-11-08 商品列表：图片独立成列（管理要单独一列、稍大、可点击放大）
+   原先把 22px 缩略图塞在「名称」列里，视觉上和商品名挤在一起，
+   既看不清也没有独立列头的语义。现在拆成 64px 宽的独立列，图 48px。
+   🔴 必须用 `#p-table` 限定作用域：.erp-row 是**全站共用**的网格
+   （客户/订单/退货都用它），直接改 .erp-row 会把别的页面列宽全部带歪。
+   🔴 多选模式（.multi）要单独再写一条：`#p-table .erp-thead` 的
+   id 权重高于 `.erp-table.multi .erp-thead`，不显式覆盖会把勾选列挤掉。
+   ============================================================ */
+#p-table .erp-thead,#p-list .erp-row{grid-template-columns:64px 1.1fr 2fr 1.7fr 1fr .8fr 1.5fr;}
+#p-table.multi .erp-thead,#p-table.multi #p-list .erp-row{grid-template-columns:30px 64px 1.1fr 2fr 1.7fr 1fr .8fr 1.5fr;}
+#p-list .c-img{display:flex;align-items:center;justify-content:center;}
+#p-list .c-img img{width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid #e3e8ee;background:#f4f6f8;cursor:zoom-in;transition:transform .12s ease;}
+#p-list .c-img img:hover{transform:scale(1.08);}
+#p-list .c-img .noimg{width:48px;height:48px;border-radius:8px;border:1px dashed #cdd6e2;background:#f4f6f8;display:flex;align-items:center;justify-content:center;font-size:10px;color:#9aa6b6;}
+
+/* 图片放大层：点图全屏看，点任意处关闭 */
+#img-zoom{position:fixed;inset:0;background:rgba(10,16,26,.84);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:zoom-out;animation:izIn .14s ease;}
+@keyframes izIn{from{opacity:0}to{opacity:1}}
+#img-zoom img{max-width:92vw;max-height:88vh;border-radius:12px;box-shadow:0 24px 64px rgba(0,0,0,.55);background:#fff;}
+#img-zoom .iz-hint{position:absolute;bottom:18px;left:0;right:0;text-align:center;color:#cfd8e3;font-size:12px;}
+
+/* 🔴 窄屏（≤480px）下必须再覆盖一次：上面 `#p-table` / `#p-list` 是 id 选择器，
+   权重高于媒体查询里的 `.erp-row`，不显式覆盖会让手机网页版挤成 7 列而破版。 */
+@media (max-width:480px){
+  #p-table .erp-thead,#p-list .erp-row{grid-template-columns:44px 1.4fr 1.7fr 1fr .9fr 1.4fr;padding:8px 10px;font-size:12px;}
+  #p-table.multi .erp-thead,#p-table.multi #p-list .erp-row{grid-template-columns:30px 44px 1.4fr 1.7fr 1fr .9fr 1.4fr;}
+  #p-list .c-img img,#p-list .c-img .noimg{width:36px;height:36px;}
+  #p-list .c-code{display:none;}
+}
+
+/* ============================================================
+   🔴🔴 2026-11-08 商品页全屏自适应（经理：不要留白）
+   原来 `.page-products` 被限在 max-width:1180px（见上方第 992 行那条合并规则），
+   宽屏（如 1920）下右侧会空出一大片，表格也挤在左边。
+   商品是 8 列的宽表，宽度越多越好读，直接放开限制铺满。
+   🔴 用 `#page.page-products`（id+class）保证优先级，能压过 `.page-products`。
+   ============================================================ */
+#page.page-products{max-width:none;}
+
+/* 双保险：即使上层还有别的宽度约束，商品表格自身也铺满可用宽度 */
+#page.page-products .erp-table{width:100%;}

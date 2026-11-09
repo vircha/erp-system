@@ -2,6 +2,7 @@ package com.heping.erpnative.ui.main
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -45,7 +46,7 @@ fun FuncScreen(onPick: (Tab) -> Unit) {
         )
     )
     LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(14.dp),
+        modifier = Modifier.fillMaxSize().statusBarsPadding().padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {

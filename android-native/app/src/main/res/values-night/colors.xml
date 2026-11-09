@@ -1,0 +1,5 @@
+<resources>
+    <!-- 深色模式：窗口底色取 Compose 深色主题的 background（#1A1729），
+         避免夜间启动时闪一下白屏。 -->
+    <color name="erp_window_bg">#1A1729</color>
+</resources>

@@ -109,10 +109,20 @@ fun CenteredMessage(msg: String) {
 }
 
 @Composable
-fun TopBar(title: String, onBack: (() -> Unit)? = null) {
-    Surface(shadowElevation = 2.dp) {
+fun TopBar(title: String, onBack: (() -> Unit)? = null, statusInset: Boolean = false) {
+    // 🔴🔴 v6.0.2：顶栏底色改成与页面**完全一致**的 background。
+    //   原来用 Surface 默认色（= surface，纯白），与页面 #FAF8FD 不同 →
+    //   状态栏 + 顶栏一条白、下面一条淡紫，就是经理说的「顶上有空白、颜色不一样」。
+    //   去掉阴影改用一条细分割线：既分隔区域，又不产生大块异色。
+    Surface(color = MaterialTheme.colorScheme.background, shadowElevation = 0.dp) {
         Row(
-            Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 8.dp),
+            // 🔴🔴 v6.0.1 最终形态：
+            //   statusBarsPadding 放在 **Surface 内部** → 顶栏背景一直画到屏幕最顶端
+            //   （含状态栏区域），所以状态栏和顶栏是同一块颜色，不可能出现色差带。
+            //   外层 Scaffold 已设 contentWindowInsets=0，因此不存在重复扣减。
+            Modifier.fillMaxWidth()
+                .statusBarsPadding()
+                .height(56.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 🔴 v5.7.13：二级页（采购/商品/客户/报表）从「功能」宫格进入，需要返回按钮
@@ -125,6 +135,11 @@ fun TopBar(title: String, onBack: (() -> Unit)? = null) {
             }
             Text(title, style = MaterialTheme.typography.titleLarge)
         }
+        // 细分割线：替代原来的投影，既分隔又不产生大色块
+        androidx.compose.material3.HorizontalDivider(
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+        )
     }
 }
 

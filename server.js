@@ -12,15 +12,158 @@ const modServer = require('./moderation_server');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+// 商品图片目录（在 public 下，直接由 serveStatic 提供，无需额外路由）
+const PRODUCT_IMG_DIR = path.join(PUBLIC_DIR, 'uploads', 'products');
+
+// ---------- 平台图库匹配的辅助函数（2026-11-07）----------
+
+/** 名称归一化：去空白/标点/常见分隔符，统一小写，去掉「x/×」这类规格符号 */
+// 中国大陆手机号：1 开头、第二位 3-9、共 11 位
+const PHONE_RX = /^1[3-9]\d{9}$/;
+
+function normName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\s\-_/\\·.,，。、:：;；()[\]（）【】'"“”*~!！?？+]/g, '')
+    .replace(/[x×✕]/g, '');
+}
+
+/**
+ * 商品名相似度打分（0~1）。
+ * 🔴 为什么用「二元组重合率」而不是编辑距离：
+ *   中文商品名普遍是「品牌+品类+规格」，一个字之差就是两个东西
+ *   （「原味酸奶」vs「原味酸乳」编辑距离很小但其实是同类，而「酸奶」vs「酸奶饮料」差得远却包含）。
+ *   二元组能同时兼顾「包含」和「局部错字」，实测比 Levenshtein 稳。
+ */
+function nameScore(a, b) {
+  const A = normName(a), B = normName(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const short = A.length <= B.length ? A : B;
+  const long = A.length <= B.length ? B : A;
+  // 包含关系给 0.6~1.0，按长度比例加权（越接近等长越可信）
+  if (long.includes(short)) return 0.6 + 0.4 * (short.length / long.length);
+  const bigrams = (s) => {
+    const r = new Set();
+    for (let i = 0; i < s.length - 1; i++) r.add(s.substr(i, 2));
+    return r;
+  };
+  const bgA = bigrams(A), bgB = bigrams(B);
+  if (!bgA.size || !bgB.size) return 0;
+  let inter = 0;
+  for (const g of bgA) if (bgB.has(g)) inter++;
+  return inter / Math.max(bgA.size, bgB.size);
+}
+
+/**
+ * 🔴🔴 2026-11-08 图片存储改为**内容寻址（去重）**：
+ *   文件名 = sha256(内容) 前 32 位 + 扩展名。
+ *   · 同一张图无论被多少个账套/多少个商品使用，磁盘上**只有一份**；
+ *   · 上传时先算哈希：已存在就直接引用，不写盘；
+ *   · 名字是内容哈希，与账套/账号无关 → 不泄漏来源，也不暴露"谁上传的"。
+ *   ⚠️ 因为多个商品会共用同一个路径，**删图前必须先确认没有任何商品还在引用**
+ *      （见 unlinkIfUnreferenced），否则会把别人的图删掉。
+ * @return 相对地址；失败返回空串
+ */
+function saveImageDedup(buf, extHint) {
+  try {
+    if (!buf || !buf.length) return '';
+    let ext = String(extHint || '.jpg').toLowerCase();
+    if (ext === '.jpeg') ext = '.jpg';
+    if (!['.jpg', '.png', '.webp'].includes(ext)) ext = '.jpg';
+    const hash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 32);
+    const fname = hash + ext;
+    const fp = path.join(PRODUCT_IMG_DIR, fname);
+    fs.mkdirSync(PRODUCT_IMG_DIR, { recursive: true });
+    if (!fs.existsSync(fp)) fs.writeFileSync(fp, buf);   // 已有同内容 → 直接复用
+    return '/uploads/products/' + fname;
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 把一张已存在的旧图「规范化」成内容哈希名（用于平台图库匹配） */
+function dedupFromExisting(srcRel) {
+  try {
+    if (!srcRel) return '';
+    const srcFp = path.normalize(path.join(PUBLIC_DIR, String(srcRel).replace(/^\//, '')));
+    if (!srcFp.startsWith(PRODUCT_IMG_DIR)) return '';
+    if (!fs.existsSync(srcFp)) return '';
+    return saveImageDedup(fs.readFileSync(srcFp), path.extname(srcFp));
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * 删掉一个不再被任何商品引用的图片文件。
+ * 🔴 去重后同路径可能被多个商品共用 → **必须查全库引用数**，
+ *   不能「切到自己这张就删」，否则会误删别人的图。
+ */
+function unlinkIfUnreferenced(rel, keepRel) {
+  try {
+    if (!rel || rel === keepRel) return;
+    const row = db.prepare('SELECT COUNT(*) AS c FROM products WHERE image=?').get(rel);
+    if (row && Number(row.c) > 0) return;      // 还有人在用 → 保留
+    const fp = path.normalize(path.join(PUBLIC_DIR, String(rel).replace(/^\//, '')));
+    if (!fp.startsWith(PRODUCT_IMG_DIR)) return;
+    if (fs.existsSync(fp)) fs.unlinkSync(fp);
+  } catch (e) { /* 删不掉不影响主流程 */ }
+}
+
+/** 校验客户端提交的 image 是否是我们自己图片目录下的合法地址（防注入外链/穿越） */
+function safeProductImage(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  if (!s.startsWith('/uploads/products/')) return '';
+  if (s.includes('..')) return '';
+  const fp = path.normalize(path.join(PUBLIC_DIR, s.replace(/^\//, '')));
+  if (!fp.startsWith(PRODUCT_IMG_DIR)) return '';
+  return s;
+}
 // CORS 跨域来源白名单（逗号分隔，如 https://a.com,https://b.com）；
 // 留空=仅允许同源 + 原生 App(capacitor/ionic://localhost)，防任意站点跨域读取 ERP 数据
 const ALLOWED_ORIGINS = (process.env.ERP_CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+/**
+ * 🔴🔴 2026-11-08 防外链（避免别人把我们的图片/APK 嵌到自己网站刷流量）。
+ *
+ * 判定规则（只针对 /uploads/ 与 /downloads/ 这两类**静态大文件**）：
+ *   · 没有 Referer → **放行**。手机 App 用 OkHttp 直连，天然不带 Referer；
+ *     浏览器直接输地址也不带。这两类都是正常用户，不能拦。
+ *   · Referer 的 host 等于本站（或本站子域）→ 放行。
+ *   · 其余（别的网站嵌我们的图/包）→ 403。
+ *
+ * 🔴 为什么不做「一次性签名 URL」：
+ *   签名会让每个用户拿到不同地址 → CDN/浏览器缓存全部失效 → 流量反而更大。
+ *   内容寻址 + 长缓存 + Referer 白名单，才是「既省流量又防外链」的组合。
+ * 🔴 另外还会下发 `Cross-Origin-Resource-Policy: same-site`，现代浏览器会直接
+ *   拒绝在跨站页面里渲染我们的资源 —— 这条比 Referer 更硬（Referer 可被伪造/剥离）。
+ */
+function isHotlinkBlocked(req, pathname) {
+  if (pathname.indexOf('/uploads/') !== 0 && pathname.indexOf('/downloads/') !== 0) return false;
+  const ref = String(req.headers.referer || '').trim();
+  if (!ref) return false;                       // App / 直接访问 → 放行
+  let host = '';
+  try { host = new URL(ref).hostname.toLowerCase(); } catch (e) { return true; }
+  const self = String(req.headers.host || '').split(':')[0].toLowerCase();
+  if (!self) return false;
+  if (host === self) return false;
+  if (host.endsWith('.' + self)) return false;   // 允许本站子域
+  return true;
+}
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
+  // 🔴 2026-11-08：原来只映射了 .png，商品图上传的是 .jpg/.webp →
+  //   全部落到 application/octet-stream，浏览器按二进制流处理后 <img> 可能不渲染。
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   // 🔴 2026-10-23：APK 必须给正确的 MIME，否则浏览器可能当文本渲染（一片乱码）
@@ -209,6 +352,8 @@ function pubProductFor(r, pmap) {
     // 本店历史价优先，没有历史价则回落到商品库统一价（经理 2026-10-18 定的口径）
     price: (own != null && own > 0) ? own : (Number(r.price) || 0),
     qty: 0, low_threshold: 0, cost: 0,
+    // 商品图片（相对 URL，空=没图，App 端显示默认占位图）
+    image: r.image || '',
   };
 }
 // 客户可见的客户字段：只给本店基本信息，剥掉备注/联系人等内部信息
@@ -928,8 +1073,397 @@ function notifyAdminsOfFeedback(fid, type, content) {
   } catch (e) { console.error('[feedback] notify:', e.message); }
 }
 
+
+// ================= 短信验证码（2026-11-08）=================
+// 🔴 配置放 /www/erp/sms.json（chmod 600），**不进仓库、不进数据库**：
+//    密钥一旦进 git 就是永久泄漏，且改密钥要重发版。
+// 🔴 为什么要图形验证码：发短信是要花钱的，任何匿名接口都会被人拿脚本刷
+//    （一条 0.04 元，一万条就是 400 元）。所以「发短信」这一步必须带图形验证码，
+//    再加手机号/IP 双维度日限 + 60 秒重发间隔。
+const SMS_CONF_PATH = path.join(__dirname, 'sms.json');
+const SMS_DEFAULTS = { codeTtlSec: 300, resendSec: 60, dailyPerPhone: 10, dailyPerIp: 20 };
+
+function smsConf() {
+  try {
+    if (!fs.existsSync(SMS_CONF_PATH)) return null;
+    const j = JSON.parse(fs.readFileSync(SMS_CONF_PATH, 'utf8'));
+    if (!j || j.enabled === false) return null;
+    return j;
+  } catch (e) { console.error('[sms] 配置读取失败:', e.message); return null; }
+}
+
+/** 短信通道是否可用（决定注册是否强制要短信码） */
+function smsReady() {
+  const c = smsConf();
+  if (!c) return false;
+  if (c.provider === 'mock') return true;      // 自测用：码只写服务器日志，不发真短信
+  if (c.provider === 'aliyun') {
+    const a = c.aliyun || {};
+    return !!(a.accessKeyId && a.accessKeySecret && a.signName && a.templateCode);
+  }
+  if (c.provider === 'tencent') {
+    const t = c.tencent || {};
+    return !!(t.secretId && t.secretKey && t.sdkAppId && t.signName && t.templateId);
+  }
+  // 🔴 阿里云「号码认证 → 短信认证」：个人实名也能用（免资质/免签名/免模板）
+  if (c.provider === 'aliyun_pnvs') {
+    const a = c.aliyun || {};
+    return !!(a.accessKeyId && a.accessKeySecret && a.signName && a.templateCode);
+  }
+  return false;
+}
+
+db.exec('CREATE TABLE IF NOT EXISTS sms_codes(' +
+  'id INTEGER PRIMARY KEY AUTOINCREMENT,' +
+  "phone TEXT NOT NULL, code_hash TEXT NOT NULL, purpose TEXT DEFAULT 'register'," +
+  'expires_at INTEGER NOT NULL, used INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0,' +
+  'ip TEXT, created_at INTEGER NOT NULL)');
+
+/** 手机号归一化：只留数字，兼容 +86 / 86 前缀 */
+function normPhone(v) {
+  let s = String(v || '').replace(/[^0-9]/g, '');
+  if (s.length === 13 && s.startsWith('86')) s = s.slice(2);
+  return s;
+}
+
+/** 短信码只存哈希（与密码同思路：库被拖走也拿不到可用的码） */
+function smsHash(code) {
+  return crypto.createHash('sha256').update('erp-sms:' + String(code)).digest('hex');
+}
+
+function clientIpOf(req) {
+  const xf = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xf || (req.socket && req.socket.remoteAddress) || '';
+}
+
+/**
+ * 阿里云短信 SendSms（RPC 风格，HMAC-SHA1 签名）。
+ * 不引 SDK：官方 SDK 体积大、且本项目只需要一个接口。
+ */
+function aliyunSendSms(a, phone, code) {
+  return new Promise((resolve) => {
+    try {
+      const params = {
+        AccessKeyId: a.accessKeyId,
+        Action: 'SendSms',
+        Format: 'JSON',
+        PhoneNumbers: phone,
+        RegionId: a.regionId || 'cn-hangzhou',
+        SignName: a.signName,
+        SignatureMethod: 'HMAC-SHA1',
+        SignatureNonce: crypto.randomUUID(),
+        SignatureVersion: '1.0',
+        TemplateCode: a.templateCode,
+        TemplateParam: JSON.stringify({ code: String(code) }),
+        Timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        Version: '2017-05-25'
+      };
+      // 阿里云要求的特殊编码：空格→%20、*→%2A、%7E→~
+      const enc = (s) => encodeURIComponent(String(s))
+        .replace(/\+/g, '%20').replace(/\*/g, '%2A').replace(/%7E/g, '~');
+      const q = Object.keys(params).sort()
+        .map(k => enc(k) + '=' + enc(params[k])).join('&');
+      const strToSign = 'GET&%2F&' + enc(q);
+      const sig = crypto.createHmac('sha1', a.accessKeySecret + '&')
+        .update(strToSign).digest('base64');
+      const url = 'https://dysmsapi.aliyuncs.com/?Signature=' + enc(sig) + '&' + q;
+      const https = require('https');
+      const rq = https.get(url, (r) => {
+        let buf = '';
+        r.on('data', d => buf += d);
+        r.on('end', () => {
+          let j = {};
+          try { j = JSON.parse(buf); } catch (e) {}
+          if (j.Code === 'OK') resolve({ ok: true });
+          else resolve({ ok: false, error: (j.Message || '') + ' [' + (j.Code || r.statusCode) + ']' });
+        });
+      });
+      rq.on('error', e => resolve({ ok: false, error: e.message }));
+      rq.setTimeout(8000, () => { rq.destroy(); resolve({ ok: false, error: '短信服务超时' }); });
+    } catch (e) { resolve({ ok: false, error: e.message }); }
+  });
+}
+
+/**
+ * 腾讯云短信 SendSms（API 版本 2021-01-11，TC3-HMAC-SHA256 签名）。
+ * 🔴 与阿里云的三个差异，接的时候必须注意：
+ *   ① 手机号要 **E.164 格式**（+8613800138000），只传 11 位会报 InvalidParameterValue；
+ *   ② 模板变量是**数组** TemplateParamSet:["123456"]，不是 {"code":"..."} 对象；
+ *   ③ 签名走 TC3：先用日期/服务/请求多级 HMAC 派生密钥，再签 StringToSign。
+ *      少任何一级派生都会得到 AuthFailure.SignatureFailure。
+ */
+function tencentSendSms(t, phone, code) {
+  return new Promise((resolve) => {
+    try {
+      const https = require('https');
+      const host = 'sms.tencentcloudapi.com';
+      const service = 'sms';
+      const action = 'SendSms';
+      const version = '2021-01-11';
+      const payload = JSON.stringify({
+        PhoneNumberSet: ['+86' + phone],          // 必须 E.164
+        SmsSdkAppId: String(t.sdkAppId),
+        SignName: String(t.signName),
+        TemplateId: String(t.templateId),
+        TemplateParamSet: [String(code)]           // 数组，不是对象
+      });
+      const ts = Math.floor(Date.now() / 1000);
+      const date = new Date(ts * 1000).toISOString().slice(0, 10);
+      const sha256hex = (x) => crypto.createHash('sha256').update(x).digest('hex');
+      const hmac = (key, x) => crypto.createHmac('sha256', key).update(x).digest();
+
+      const ct = 'application/json; charset=utf-8';
+      const canonicalHeaders = 'content-type:' + ct + '\n' +
+        'host:' + host + '\n' +
+        'x-tc-action:' + action.toLowerCase() + '\n';
+      const signedHeaders = 'content-type;host;x-tc-action';
+      const canonicalRequest = ['POST', '/', '', canonicalHeaders, signedHeaders, sha256hex(payload)].join('\n');
+      const scope = date + '/' + service + '/tc3_request';
+      const stringToSign = ['TC3-HMAC-SHA256', String(ts), scope, sha256hex(canonicalRequest)].join('\n');
+      const kDate = hmac('TC3' + t.secretKey, date);
+      const kService = hmac(kDate, service);
+      const kSigning = hmac(kService, 'tc3_request');
+      const signature = crypto.createHmac('sha256', kSigning).update(stringToSign).digest('hex');
+      const auth = 'TC3-HMAC-SHA256 Credential=' + t.secretId + '/' + scope +
+        ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
+
+      const rq = https.request({
+        host, method: 'POST', path: '/',
+        headers: {
+          'Authorization': auth,
+          'Content-Type': ct,
+          'Content-Length': Buffer.byteLength(payload),
+          'Host': host,
+          'X-TC-Action': action,
+          'X-TC-Version': version,
+          'X-TC-Timestamp': String(ts),
+          'X-TC-Region': t.region || 'ap-guangzhou'
+        }
+      }, (r) => {
+        let buf = '';
+        r.on('data', d => buf += d);
+        r.on('end', () => {
+          let j = {};
+          try { j = JSON.parse(buf); } catch (e) {}
+          const resp = j.Response || {};
+          if (resp.Error) return resolve({ ok: false, error: resp.Error.Message + ' [' + resp.Error.Code + ']' });
+          const st = (resp.SendStatusSet || [])[0] || {};
+          if (st.Code === 'Ok') return resolve({ ok: true });
+          resolve({ ok: false, error: (st.Message || '发送失败') + ' [' + (st.Code || '') + ']' });
+        });
+      });
+      rq.on('error', e => resolve({ ok: false, error: e.message }));
+      rq.setTimeout(8000, () => { rq.destroy(); resolve({ ok: false, error: '短信服务超时' }); });
+      rq.write(payload);
+      rq.end();
+    } catch (e) { resolve({ ok: false, error: e.message }); }
+  });
+}
+
+/**
+ * 阿里云 RPC 风格接口的通用 GET 调用（HMAC-SHA1 签名）。
+ * 阿里云的短信/号码认证都是这一套签名，抽出来复用，避免两处各写一遍签错。
+ */
+function aliyunRpcCall(host, action, extra, a) {
+  return new Promise((resolve) => {
+    try {
+      const https = require('https');
+      const params = Object.assign({}, extra, {
+        AccessKeyId: a.accessKeyId,
+        Action: action,
+        Format: 'JSON',
+        RegionId: a.regionId || 'cn-hangzhou',
+        SignatureMethod: 'HMAC-SHA1',
+        SignatureNonce: crypto.randomUUID(),
+        SignatureVersion: '1.0',
+        Timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        Version: '2017-05-25'
+      });
+      const enc = (x) => encodeURIComponent(String(x))
+        .replace(/\+/g, '%20').replace(/\*/g, '%2A').replace(/%7E/g, '~');
+      const q = Object.keys(params).sort().map(k => enc(k) + '=' + enc(params[k])).join('&');
+      const strToSign = 'GET&%2F&' + enc(q);
+      const sig = crypto.createHmac('sha1', a.accessKeySecret + '&').update(strToSign).digest('base64');
+      const url = 'https://' + host + '/?Signature=' + enc(sig) + '&' + q;
+      const rq = https.get(url, (r) => {
+        let b = '';
+        r.on('data', d => b += d);
+        r.on('end', () => { let j = {}; try { j = JSON.parse(b); } catch (e) {} resolve(j); });
+      });
+      rq.on('error', e => resolve({ __err: e.message }));
+      rq.setTimeout(9000, () => { rq.destroy(); resolve({ __err: '短信服务超时' }); });
+    } catch (e) { resolve({ __err: e.message }); }
+  });
+}
+
+/**
+ * 阿里云号码认证 · 发送短信验证码（SendSmsVerifyCode）
+ * 🔴 与普通短信服务的区别：
+ *   · 签名/模板**必须用控制台「赠送签名/赠送模板」里系统给的那套**，不支持自定义；
+ *   · 验证码由阿里云生成（TemplateParam 里写 ##code## 占位），我们拿不到明文；
+ *   · 有效期/重发间隔/码长都是参数，服务端自己管生命周期。
+ */
+async function pnvsSend(a, phone) {
+  const j = await aliyunRpcCall('dypnsapi.aliyuncs.com', 'SendSmsVerifyCode', {
+    PhoneNumber: phone,
+    CountryCode: '86',
+    SignName: String(a.signName),
+    TemplateCode: String(a.templateCode),
+    TemplateParam: JSON.stringify({ code: '##code##', min: '5' }),
+    CodeLength: 6,
+    ValidTime: 300,
+    Interval: 60,
+    SchemeName: a.schemeName || '默认方案'
+  }, a);
+  if (j.__err) return { ok: false, error: j.__err };
+  if (j.Code === 'OK') return { ok: true };
+  return { ok: false, error: (j.Message || '发送失败') + ' [' + (j.Code || '') + ']' };
+}
+
+/** 阿里云号码认证 · 核验短信验证码（CheckSmsVerifyCode），返回 PASS/FAIL */
+async function pnvsCheck(a, phone, code) {
+  const j = await aliyunRpcCall('dypnsapi.aliyuncs.com', 'CheckSmsVerifyCode', {
+    PhoneNumber: phone,
+    CountryCode: '86',
+    VerifyCode: String(code),
+    SchemeName: a.schemeName || '默认方案'
+  }, a);
+  if (j.__err) return { ok: false, error: '短信服务异常，请稍后重试' };
+  const pass = j.Model && (j.Model.VerifyResult === 'PASS' || j.Model.VerifyResult === 'pass');
+  if (j.Code === 'OK' && pass) return { ok: true };
+  return { ok: false, error: '短信验证码错误或已过期' };
+}
+
+/** 校验短信码：一次有效、5 分钟过期、最多试 5 次 */
+function verifySmsCode(phone, code) {
+  const now = Date.now();
+  const row = db.prepare("SELECT * FROM sms_codes WHERE phone=? AND used=0 AND purpose='register' ORDER BY id DESC LIMIT 1").get(phone);
+  if (!row) return { ok: false, error: '请先获取短信验证码' };
+  if (Number(row.expires_at) < now) return { ok: false, error: '短信验证码已过期，请重新获取' };
+  if (Number(row.attempts) >= 5) return { ok: false, error: '验证码错误次数过多，请重新获取' };
+  if (smsHash(String(code || '').trim()) !== row.code_hash) {
+    db.prepare('UPDATE sms_codes SET attempts=attempts+1 WHERE id=?').run(row.id);
+    return { ok: false, error: '短信验证码错误' };
+  }
+  db.prepare('UPDATE sms_codes SET used=1 WHERE id=?').run(row.id);
+  return { ok: true };
+}
+
+
+// ================= 邮箱验证码（2026-11-09）=================
+// 🔴 服务器**没有 npm**（项目只用 node 内置模块），所以不能用 nodemailer，
+//    这里用 node:tls 手写一个最小 SMTP 客户端。163 邮箱走 465 隐式 TLS，最简单可靠。
+// 🔴 配置放 /www/erp/sms.json 的 email 段（与短信同一个文件，600 权限，不入库不入 git）：
+//    { "emailEnabled": true, "email": { "host":"smtp.163.com","port":465,
+//      "user":"xxx@163.com","pass":"授权码","fromName":"简单ERP" } }
+//    ⚠️ pass 填的是邮箱的**客户端授权码**，不是网页登录密码。
+const EMAIL_RX = /^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/;
+
+function mailConf() {
+  // 🔴 不能走 smsConf()：那个函数在 `enabled:false`（短信通道未开）时直接返回 null，
+  //    导致「短信关着 → 邮箱也一起失效」。邮箱和短信是**两个独立开关**，必须各读各的。
+  try {
+    if (!fs.existsSync(SMS_CONF_PATH)) return null;
+    const c = JSON.parse(fs.readFileSync(SMS_CONF_PATH, 'utf8'));
+    if (!c || !c.emailEnabled) return null;
+    const e = c.email || {};
+    if (!e.host || !e.port || !e.user || !e.pass) return null;
+    return e;
+  } catch (e) { console.error('[email] 配置读取失败:', e.message); return null; }
+}
+function smtpReady() { return !!mailConf(); }
+
+db.exec('CREATE TABLE IF NOT EXISTS email_codes(' +
+  'id INTEGER PRIMARY KEY AUTOINCREMENT,' +
+  'email TEXT NOT NULL, code_hash TEXT NOT NULL,' +
+  'expires_at INTEGER NOT NULL, used INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0,' +
+  'ip TEXT, created_at INTEGER NOT NULL)');
+
+function emailHash(code) {
+  return crypto.createHash('sha256').update('erp-mail:' + String(code)).digest('hex');
+}
+
+/**
+ * 最小 SMTP 发信（隐式 TLS，AUTH LOGIN）。
+ * 🔴 正文用 base64 编码：这样内容里绝不会出现以 "." 开头的行，
+ *    彻底避开 SMTP 的「行首点需要转义」坑（否则正文会把点号吃掉）。
+ */
+function smtpSendMail(cfg, to, subject, text) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; try { sock.destroy(); } catch (e) {} resolve(r); } };
+    const tls = require('tls');
+    const from = cfg.user;
+    const b64body = Buffer.from(String(text), 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+    const msg = [
+      'From: ' + (cfg.fromName ? '=?UTF-8?B?' + Buffer.from(String(cfg.fromName)).toString('base64') + '?= ' : '') + '<' + from + '>',
+      'To: <' + to + '>',
+      'Subject: =?UTF-8?B?' + Buffer.from(String(subject), 'utf8').toString('base64') + '?=',
+      'MIME-Version: 1.0',
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      'Date: ' + new Date().toUTCString(),
+      '',
+      b64body
+    ].join('\r\n');
+
+    const steps = [
+      { cmd: null, expect: 220 },
+      { cmd: 'EHLO erp.local', expect: 250 },
+      { cmd: 'AUTH LOGIN', expect: 334 },
+      { cmd: Buffer.from(from, 'utf8').toString('base64'), expect: 334 },
+      { cmd: Buffer.from(String(cfg.pass), 'utf8').toString('base64'), expect: 235 },
+      { cmd: 'MAIL FROM:<' + from + '>', expect: 250 },
+      { cmd: 'RCPT TO:<' + to + '>', expect: 250 },
+      { cmd: 'DATA', expect: 354 },
+      { cmd: msg + '\r\n.', expect: 250 },
+      { cmd: 'QUIT', expect: 221, last: true }
+    ];
+    let idx = 0, buf = '';
+
+    const sock = tls.connect({ host: cfg.host, port: Number(cfg.port), servername: cfg.host, rejectUnauthorized: false }, () => {});
+    sock.setTimeout(15000, () => finish({ ok: false, error: 'SMTP 超时' }));
+    sock.on('error', (e) => finish({ ok: false, error: e.message }));
+    sock.on('data', (chunk) => {
+      buf += chunk.toString('utf8');
+      // 一行响应可能是 "250-xxx" 多行，最后一行以 "250 " 结尾
+      const m = buf.match(/^(\d{3}) [^\r\n]*\r?\n/m);
+      if (!m) return;
+      const code = Number(m[1]);
+      buf = '';
+      const st = steps[idx];
+      if (!st) return finish({ ok: false, error: 'SMTP 状态异常' });
+      if (code !== st.expect && !(code >= 200 && code < 300 && st.expect === 250)) {
+        return finish({ ok: false, error: 'SMTP ' + code + '（第 ' + (idx + 1) + ' 步）' });
+      }
+      idx += 1;
+      if (st.last) return finish({ ok: true });
+      const next = steps[idx];
+      if (next && next.cmd !== null) sock.write(next.cmd + '\r\n');
+    });
+  });
+}
+
+/** 校验邮箱验证码：一次性、5 分钟、最多试 5 次 */
+function verifyEmailCode(email, code) {
+  const now = Date.now();
+  const row = db.prepare('SELECT * FROM email_codes WHERE email=? AND used=0 ORDER BY id DESC LIMIT 1').get(email);
+  if (!row) return { ok: false, error: '请先获取邮箱验证码' };
+  if (Number(row.expires_at) < now) return { ok: false, error: '邮箱验证码已过期，请重新获取' };
+  if (Number(row.attempts) >= 5) return { ok: false, error: '验证码错误次数过多，请重新获取' };
+  if (emailHash(String(code || '').trim()) !== row.code_hash) {
+    db.prepare('UPDATE email_codes SET attempts=attempts+1 WHERE id=?').run(row.id);
+    return { ok: false, error: '邮箱验证码错误' };
+  }
+  db.prepare('UPDATE email_codes SET used=1 WHERE id=?').run(row.id);
+  return { ok: true };
+}
+
 async function handleApi(req, res, u) {
   const p = u.pathname, method = req.method;
+  // ⚠️ 防外链检查**不在这里**：本函数只处理 /api/ 前缀，
+  //    而图片/APK 是走 requestHandler → serveStatic 的静态路径。
+  //    检查已放在 requestHandler 入口（见下方）。
 
   // ---------- 无需鉴权 ----------
   // 图形验证码（注册必填；登录失败 3 次后必填）
@@ -944,12 +1478,164 @@ async function handleApi(req, res, u) {
     const fails = loginFails(u);
     return sendJSON(res, 200, { need_captcha: fails >= 3, fails });
   }
+  // ---------- 邮箱验证码：发送 ----------
+  if (p === '/api/email/send' && method === 'POST') {
+    const b = await getBody(req).catch(() => ({}));
+    // 同样先过图形验证码：邮箱接口也会被人拿来当免费发信机
+    if (!verifyCaptcha(b.captcha_id, b.captcha)) return sendJSON(res, 400, { error: '图形验证码错误或已过期' });
+    const email = String(b.email || '').trim().toLowerCase();
+    if (!EMAIL_RX.test(email)) return sendJSON(res, 400, { error: '邮箱格式不正确' });
+    if (!smtpReady()) return sendJSON(res, 503, { error: '邮箱验证未开启，请联系管理员' });
+    const c = smsConf();
+    const cfg = Object.assign({}, SMS_DEFAULTS, c);
+    const now = Date.now();
+
+    const last = db.prepare('SELECT created_at FROM email_codes WHERE email=? ORDER BY id DESC LIMIT 1').get(email);
+    if (last && now - Number(last.created_at) < cfg.resendSec * 1000) {
+      const wait = Math.ceil((cfg.resendSec * 1000 - (now - Number(last.created_at))) / 1000);
+      return sendJSON(res, 429, { error: '请 ' + wait + ' 秒后再获取' });
+    }
+    const dayAgo = now - 86400000;
+    const ip = clientIpOf(req);
+    if (Number(db.prepare('SELECT COUNT(*) c FROM email_codes WHERE email=? AND created_at>?').get(email, dayAgo).c) >= cfg.dailyPerPhone) {
+      return sendJSON(res, 429, { error: '该邮箱今日获取次数已达上限' });
+    }
+    if (ip && Number(db.prepare('SELECT COUNT(*) c FROM email_codes WHERE ip=? AND created_at>?').get(ip, dayAgo).c) >= cfg.dailyPerIp) {
+      return sendJSON(res, 429, { error: '当前网络今日获取次数已达上限' });
+    }
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    db.prepare('INSERT INTO email_codes(email,code_hash,expires_at,ip,created_at) VALUES(?,?,?,?,?)')
+      .run(email, emailHash(code), now + cfg.codeTtlSec * 1000, ip, now);
+
+    const mc = mailConf();
+    if (c.provider === 'mock' || c.emailMock) {
+      console.log('[email][mock] ' + email + ' 验证码=' + code);
+      return sendJSON(res, 200, { ok: true, ttl: cfg.codeTtlSec, mock: true });
+    }
+    const r = await smtpSendMail(mc, email, '【简单ERP】注册验证码',
+      '您的验证码是 ' + code + '，5 分钟内有效。\n\n如果不是你本人操作，请忽略这封邮件。');
+    if (!r.ok) {
+      db.prepare('DELETE FROM email_codes WHERE email=? AND used=0').run(email);
+      return sendJSON(res, 502, { error: '邮件发送失败：' + r.error });
+    }
+    return sendJSON(res, 200, { ok: true, ttl: cfg.codeTtlSec });
+  }
+
+  // ---------- 邮箱验证开关状态 ----------
+  if (p === '/api/email/status' && method === 'GET') {
+    const c = smsConf() || {};
+    const cfg = Object.assign({}, SMS_DEFAULTS, c);
+    return sendJSON(res, 200, { required: smtpReady(), ttl: cfg.codeTtlSec, resend: cfg.resendSec });
+  }
+
+  // ---------- 短信验证码：发送 ----------
+  if (p === '/api/sms/send' && method === 'POST') {
+    const b = await getBody(req).catch(() => ({}));
+    // 🔴 必须先过图形验证码：短信是要花钱的，裸接口会被脚本刷爆
+    if (!verifyCaptcha(b.captcha_id, b.captcha)) return sendJSON(res, 400, { error: '图形验证码错误或已过期' });
+    const phone = normPhone(b.phone);
+    if (!PHONE_RX.test(phone)) return sendJSON(res, 400, { error: '手机号格式不正确' });
+    if (!smsReady()) return sendJSON(res, 503, { error: '短信服务未配置，请联系管理员' });
+    const c = smsConf();
+    const cfg = Object.assign({}, SMS_DEFAULTS, c);
+    const now = Date.now();
+
+    const last = db.prepare('SELECT created_at FROM sms_codes WHERE phone=? ORDER BY id DESC LIMIT 1').get(phone);
+    if (last && now - Number(last.created_at) < cfg.resendSec * 1000) {
+      const wait = Math.ceil((cfg.resendSec * 1000 - (now - Number(last.created_at))) / 1000);
+      return sendJSON(res, 429, { error: '请 ' + wait + ' 秒后再获取' });
+    }
+    const dayAgo = now - 86400000;
+    const ip = clientIpOf(req);
+    if (Number(db.prepare('SELECT COUNT(*) c FROM sms_codes WHERE phone=? AND created_at>?').get(phone, dayAgo).c) >= cfg.dailyPerPhone) {
+      return sendJSON(res, 429, { error: '该手机号今日获取次数已达上限' });
+    }
+    if (ip && Number(db.prepare('SELECT COUNT(*) c FROM sms_codes WHERE ip=? AND created_at>?').get(ip, dayAgo).c) >= cfg.dailyPerIp) {
+      return sendJSON(res, 429, { error: '当前网络今日获取次数已达上限' });
+    }
+
+    // 🔴 号码认证通道：码由阿里云生成和保管，我们不存明文，
+    //   但**仍写一条记录**用于我们自己的「同号 60 秒 / 日限」限流。
+    if (c.provider === 'aliyun_pnvs') {
+      db.prepare('INSERT INTO sms_codes(phone,code_hash,purpose,expires_at,ip,created_at) VALUES(?,?,?,?,?,?)')
+        .run(phone, 'PNVS', 'register', now + cfg.codeTtlSec * 1000, ip, now);
+      const rp = await pnvsSend(c.aliyun || {}, phone);
+      if (!rp.ok) {
+        db.prepare('DELETE FROM sms_codes WHERE phone=? AND code_hash=?').run(phone, 'PNVS');
+        return sendJSON(res, 502, { error: '短信发送失败：' + rp.error });
+      }
+      return sendJSON(res, 200, { ok: true, ttl: cfg.codeTtlSec });
+    }
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    db.prepare('INSERT INTO sms_codes(phone,code_hash,purpose,expires_at,ip,created_at) VALUES(?,?,?,?,?,?)')
+      .run(phone, smsHash(code), 'register', now + cfg.codeTtlSec * 1000, ip, now);
+
+    if (c.provider === 'mock') {
+      console.log('[sms][mock] ' + phone + ' 验证码=' + code + '（仅日志，未真实发送）');
+      return sendJSON(res, 200, { ok: true, ttl: cfg.codeTtlSec, mock: true });
+    }
+    const r = c.provider === 'aliyun'
+      ? await aliyunSendSms(c.aliyun || {}, phone, code)
+      : (c.provider === 'tencent'
+        ? await tencentSendSms(c.tencent || {}, phone, code)
+        : { ok: false, error: '不支持的短信服务商' });
+    if (!r.ok) {
+      // 发送失败要把已写入的码作废，否则下次要等 60 秒
+      db.prepare('DELETE FROM sms_codes WHERE phone=? AND used=0').run(phone);
+      return sendJSON(res, 502, { error: '短信发送失败：' + r.error });
+    }
+    return sendJSON(res, 200, { ok: true, ttl: cfg.codeTtlSec });
+  }
+
+  // ---------- 短信开关状态（前端据此决定要不要显示验证码输入框） ----------
+  if (p === '/api/sms/status' && method === 'GET') {
+    const c = smsConf();
+    const cfg = Object.assign({}, SMS_DEFAULTS, c || {});
+    return sendJSON(res, 200, { required: smsReady(), ttl: cfg.codeTtlSec, resend: cfg.resendSec });
+  }
+
   if (p === '/api/register' && method === 'POST') {
     const b = await getBody(req).catch(() => ({}));
-    const username = String(b.username || '').trim();
+    // 🔴🔴 2026-11-08 注册账号**只能是手机号**（经理：非要能随便填都注册成功）。
+    //   原来只校验「>=4 位」，随手打 4 个字母就能建号。
+    //   ⚠️ 只约束**注册**：老账号（admin、kf01 之类非手机号）照常能登录，
+    //      否则一改就把历史账户全锁死。
     const password = String(b.password || '');
+    const rawUser = String(b.username || '').trim();
     if (!verifyCaptcha(b.captcha_id, b.captcha)) return sendJSON(res, 400, { error: '验证码错误或已过期' });
-    if (!username || username.length < 4) return sendJSON(res, 400, { error: '账号至少 4 位' });
+
+    // 🔴🔴 2026-11-09 验证方式改为**以邮箱为主**：
+    //   · 邮箱注册 → 邮箱验证码通过即生效（approved=1），无需人工审核；
+    //   · 手机号注册 → 没有可用的短信通道（个人资质）→ 一律 approved=0，等管理员确认。
+    let username = '';
+    let approved = 0;
+    if (rawUser.indexOf('@') >= 0) {
+      if (!EMAIL_RX.test(rawUser)) return sendJSON(res, 400, { error: '邮箱格式不正确' });
+      username = rawUser.toLowerCase();
+      if (!smtpReady()) return sendJSON(res, 400, { error: '邮箱验证未开启，请联系管理员' });
+      const ev = verifyEmailCode(username, b.email_code);
+      if (!ev.ok) return sendJSON(res, 400, { error: ev.error });
+      approved = 1;                       // 邮箱已验证 = 真人，直接可用
+    } else {
+      let pn = rawUser.replace(/[^0-9]/g, '');
+      if (pn.length === 13 && pn.startsWith('86')) pn = pn.slice(2);
+      if (!PHONE_RX.test(pn)) return sendJSON(res, 400, { error: '账号必须是邮箱，或 11 位手机号' });
+      username = pn;
+      // 若将来配了短信通道，仍然要求验证手机
+      if (smsReady()) {
+        const _c = smsConf();
+        if (_c.provider === 'aliyun_pnvs') {
+          const rv = await pnvsCheck(_c.aliyun || {}, username, b.sms_code);
+          if (!rv.ok) return sendJSON(res, 400, { error: rv.error });
+        } else {
+          const sv = verifySmsCode(username, b.sms_code);
+          if (!sv.ok) return sendJSON(res, 400, { error: sv.error });
+        }
+      }
+      approved = 0;                       // 手机号注册 → 管理员确认
+    }
     if (password.length < 4) return sendJSON(res, 400, { error: '密码至少 4 位' });
     if (db.prepare('SELECT id FROM accounts WHERE username=?').get(username)) return sendJSON(res, 400, { error: '该账号已存在' });
     // 注册默认为老板；未指定套账则自动创建新套账，指定则加入该套账（角色可被该套账老板调整）
@@ -986,16 +1672,32 @@ async function handleApi(req, res, u) {
           }
         }
         if (!ok && bookInv && input.trim().toUpperCase() === bookInv) ok = true;
-        if (!ok && (storedJoin || bookInv)) { db.exec('ROLLBACK'); return sendJSON(res, 400, { error: '加入口令或邀请码错误' }); }
+        // 🔴🔴 2026-11-07 安全收紧：以前这里写的是
+        //     `if (!ok && (storedJoin || bookInv))` —— 两个口令**都为空**时该条件为假，
+        //     于是一个「既没设加入口令、也没生成邀请码」的套账，任何人凭 book_id 就能直接加入。
+        //     现在改为：**必须持有有效凭证**才能加入，无凭证一律拒绝。
+        if (!ok) { db.exec('ROLLBACK'); return sendJSON(res, 400, { error: '加入口令或邀请码错误' }); }
         role = 'staff'; // 加入已有套账，默认员工，由老板调整
       }
-      const info = db.prepare('INSERT INTO accounts(username,password,display_name,role,book_id,active) VALUES(?,?,?,?,?,1)')
-        .run(username, hashPassword(password), String(b.display_name || '').trim() || username, role, bookId);
+      // 🔴 新注册一律 approved=0（待审核）：审核通过前不给会话
+      const info = db.prepare('INSERT INTO accounts(username,password,display_name,role,book_id,active,approved) VALUES(?,?,?,?,?,1,?)')
+        .run(username, hashPassword(password), String(b.display_name || '').trim() || username, role, bookId, approved);
       const aid = info.lastInsertRowid;
       db.prepare('INSERT OR IGNORE INTO account_books(account_id,book_id) VALUES(?,?)').run(aid, bookId);
       if (role === 'boss') db.prepare('UPDATE books SET owner_account_id=? WHERE id=? AND owner_account_id IS NULL').run(aid, bookId);
       db.exec('COMMIT');
       const acc = db.prepare('SELECT * FROM accounts WHERE id=?').get(aid);
+      // 🔴 待审核：**不发 token、不建会话**。
+      //   否则「注册即登录」等于审核形同虚设。
+      //   注意此时账号和套账已经建好了 —— 管理员审核通过后直接能进，
+      //   若审核不通过，管理员用「删除账户」清掉即可（会自动回收空套账）。
+      if (Number(acc.approved) === 0) {
+        return sendJSON(res, 200, {
+          pending: true,
+          username: acc.username,
+          message: '注册成功，等待管理员审核。审核通过后即可用手机号登录。'
+        });
+      }
       const tok = newSession(acc);
       const book = db.prepare('SELECT * FROM books WHERE id=?').get(bookId);
       const _rIds = custStoreIdsOf(acc, bookId);
@@ -1033,6 +1735,10 @@ async function handleApi(req, res, u) {
         appeal: '如有异议请联系平台管理员'
       });
     }
+    // 🔴 待审核账号：密码对也不能进，且要明确告知「在等审核」而不是「密码错」
+    if (Number(acc.approved) === 0) {
+      return sendJSON(res, 403, { error: '账号待管理员审核，通过后即可登录', pending: true });
+    }
     clearIpFail(rip);
     clearLoginFail(username);
     const tok = newSession(acc);
@@ -1058,15 +1764,20 @@ async function handleApi(req, res, u) {
     if (!row) return sendJSON(res, 401, { error: '设备信任已过期，请重新登录' });
     const acc = db.prepare('SELECT * FROM accounts WHERE id=? AND active=1').get(row.account_id);
     if (!acc) { db.prepare('DELETE FROM trusted_devices WHERE id=?').run(row.id); return sendJSON(res, 401, { error: '账户已停用' }); }
+    // 🔴 待审核账号不能靠「信任设备」绕过审核
+    if (Number(acc.approved) === 0) {
+      return sendJSON(res, 403, { error: '账号待管理员审核，通过后即可登录', pending: true });
+    }
     touchTrusted(row.id);
     const tok = newSession(acc);
     const book = db.prepare('SELECT * FROM books WHERE id=?').get(acc.book_id);
     return sendJSON(res, 200, { token: tok, account: pubAcc(acc), book: pubBook(book), role: acc.role, roleLabel: roleLabel(acc.role), perms: effectivePerms(acc), shopName: effShopName(book), device_token: b.device_token });
   }
-  if (p === '/api/books/public' && method === 'GET') {
-    // 注册时可选套账列表（仅名称/ID）
-    return sendJSON(res, 200, db.prepare('SELECT id,name FROM books ORDER BY id').all());
-  }
+  // 🔴🔴 2026-11-07 已**删除** `GET /api/books/public`。
+  //   原实现无需登录就 `SELECT id,name FROM books`，把**所有客户的套账名称**公开列出 ——
+  //   任何人打开注册页就能看到全部客户名录（经理明确要求抹除）。
+  //   现在加入套账只认「邀请码」：邀请码由该套账老板在设置里生成，
+  //   服务端用它反查 book_id，客户端**永远拿不到套账列表**。
 
   // ---------- 公开：版本检查（无需登录） ----------
   if (p === '/api/version' && method === 'GET') {
@@ -1459,6 +2170,90 @@ async function handleApi(req, res, u) {
     const ok = MOD.unbanAccount(Number(m[1]), ctx.account.id);
     return sendJSON(res, 200, { ok });
   }
+  // 🔴 审核通过 / 驳回
+  m = p.match(/^\/api\/admin\/accounts\/(\d+)\/approve$/);
+  if (m && method === 'POST') {
+    if (!needAdmin()) return;
+    const b = await getBody(req).catch(() => ({}));
+    const acc = db.prepare('SELECT * FROM accounts WHERE id=?').get(m[1]);
+    if (!acc) return sendJSON(res, 404, { error: '账户不存在' });
+    const pass = b.pass !== false;   // 默认通过
+    // 驳回不删号：留着等管理员彻底删除，避免误判后无法恢复
+    db.prepare('UPDATE accounts SET approved=? WHERE id=?').run(pass ? 1 : 0, m[1]);
+    try { MOD.logMod(Number(m[1]), pass ? 'approve' : 'reject', pass ? '管理员审核通过' : '管理员驳回注册', acc.username, ctx.account.id); } catch (e) {}
+    return sendJSON(res, 200, { ok: true, approved: pass });
+  }
+
+  // 🔴🔴 2026-11-08 管理员删除账户
+  //   比封禁更彻底：账号行本身消失，且该账号所有在线会话立即失效。
+  //   三个必须处理的连带问题：
+  //     ① 它可能是某个套账的老板 → 要把老板「交接」给同套账的下一个老板/员工，
+  //        否则套账变成无主（老板权限靠 books.owner_account_id 判定）；
+  //     ② 套账若已空无一人且没有任何业务数据 → 一并删掉，避免留下永远进不去的僵尸套账；
+  //     ③ 信任设备表要清，否则那台设备还能凭 device_token 复活会话。
+  m = p.match(/^\/api\/admin\/accounts\/(\d+)$/);
+  if (m && method === 'DELETE') {
+    if (!needAdmin()) return;
+    const id = Number(m[1]);
+    const acc = db.prepare('SELECT * FROM accounts WHERE id=?').get(id);
+    if (!acc) return sendJSON(res, 404, { error: '账户不存在' });
+    if (acc.id === ctx.account.id) return sendJSON(res, 400, { error: '不能删除自己的账号' });
+    if (acc.is_admin) return sendJSON(res, 403, { error: '管理员账号不可被删除' });
+
+    // 先记治理日志（外键是 OFF，删完再记会变成悬空引用，看不出删的是谁）
+    try { MOD.logMod(id, 'delete', '管理员删除账户', acc.username, ctx.account.id); } catch (e) {}
+
+    db.exec('BEGIN');
+    try {
+      // ① 老板交接
+      const bk = db.prepare('SELECT * FROM books WHERE owner_account_id=?').get(id);
+      let orphanBook = null;
+      if (bk) {
+        const others = db.prepare('SELECT id, role FROM accounts WHERE book_id=? AND id<>? AND active=1 ORDER BY id').all(bk.id, id);
+        const heir = others.find(o => o.role === 'boss') || others[0] || null;
+        db.prepare('UPDATE books SET owner_account_id=? WHERE id=?').run(heir ? heir.id : null, bk.id);
+        if (!heir) orphanBook = bk;
+      }
+      // ② 关联清理
+      db.prepare('DELETE FROM trusted_devices WHERE account_id=?').run(id);
+      db.prepare('DELETE FROM account_books WHERE account_id=?').run(id);
+      db.prepare('DELETE FROM accounts WHERE id=?').run(id);
+
+      // ③ 空套账且无业务数据 → 一并删除
+      let bookDeleted = false, bookKept = '';
+      if (orphanBook) {
+        const remain = Number(db.prepare('SELECT COUNT(*) c FROM accounts WHERE book_id=?').get(orphanBook.id).c);
+        if (remain === 0) {
+          const pr = Number(db.prepare('SELECT COUNT(*) c FROM products WHERE book_id=?').get(orphanBook.id).c);
+          const od = Number(db.prepare('SELECT COUNT(*) c FROM orders WHERE book_id=?').get(orphanBook.id).c);
+          const cu = Number(db.prepare('SELECT COUNT(*) c FROM customers WHERE book_id=?').get(orphanBook.id).c);
+          if (pr === 0 && od === 0 && cu === 0) {
+            db.prepare('DELETE FROM settings WHERE book_id=?').run(orphanBook.id);
+            db.prepare('DELETE FROM price_systems WHERE book_id=?').run(orphanBook.id);
+            db.prepare('DELETE FROM books WHERE id=?').run(orphanBook.id);
+            bookDeleted = true;
+          } else {
+            bookKept = orphanBook.name;   // 有数据但没人了 → 保留，仅供管理员查阅
+          }
+        }
+      }
+      db.exec('COMMIT');
+
+      // ④ 立刻踢掉该账号所有在线会话
+      for (const [tk, sv] of SESSIONS) { if (sv.account_id === id) SESSIONS.delete(tk); }
+
+      return sendJSON(res, 200, {
+        ok: true,
+        username: acc.username,
+        book_deleted: bookDeleted,
+        book_kept: bookKept
+      });
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return sendJSON(res, 500, { error: '删除失败：' + e.message });
+    }
+  }
+
   // 白名单切换：豁免内容检测 + 豁免自动封禁
   m = p.match(/^\/api\/admin\/accounts\/(\d+)\/whitelist$/);
   if (m && method === 'POST') {
@@ -1551,7 +2346,9 @@ async function handleApi(req, res, u) {
     if (!need('product.edit')) return;
     const b = await getBody(req);
     if (!b.name) return sendJSON(res, 400, { error: '商品名必填' });
-    const info = db.prepare('INSERT INTO products(book_id,name,barcode,spec,unit,price,cost,pack_size) VALUES(?,?,?,?,?,?,?,?)').run(bookId, b.name, b.barcode || '', b.spec || '', b.unit || '个', Number(b.price) || 0, Number(b.cost) || 0, Math.max(0, Math.round(Number(b.pack_size))) || 0);
+    // 🔴 2026-11-07 支持直接带图片（新增商品时先「获取同类照片」再保存的场景）
+    const imgNew = safeProductImage(b.image);
+    const info = db.prepare('INSERT INTO products(book_id,name,barcode,spec,unit,price,cost,pack_size,image) VALUES(?,?,?,?,?,?,?,?,?)').run(bookId, b.name, b.barcode || '', b.spec || '', b.unit || '个', Number(b.price) || 0, Number(b.cost) || 0, Math.max(0, Math.round(Number(b.pack_size))) || 0, imgNew);
     const pid = info.lastInsertRowid;
     db.prepare('INSERT OR IGNORE INTO inventory(book_id,product_id,qty,low_threshold) VALUES(?,?,?,?)').run(bookId, pid, Number(b.qty) || 0, Number(b.low_threshold) || 0);
     // MOD：登记违规（不拦截写入，30 分钟内改名即自动解除）
@@ -1571,6 +2368,10 @@ async function handleApi(req, res, u) {
       String(b.spec == null ? '' : b.spec), String(b.unit == null ? '个' : b.unit),
       Number(b.price) || 0, Number(b.cost) || 0,
       Math.max(0, Math.round(Number(b.pack_size))) || 0, m[1]);
+    // 🔴 图片同样是「带才写」：网页/手机端不传 image 时不能把已有图清空
+    if (b.image !== undefined && b.image !== null) {
+      db.prepare('UPDATE products SET image=? WHERE id=?').run(safeProductImage(b.image), m[1]);
+    }
     // 🔴 2026-10-21 修 Bug A：原来这里无条件把库存写成 Number(b.qty)||0，
     //   而网页端编辑商品的表单**根本没有 qty 字段** → Number(undefined)||0 = 0
     //   → 经理每改一次商品名，这个商品的库存就被清零（生产库 108 个商品里 81 个账面是 0）。
@@ -1591,7 +2392,8 @@ async function handleApi(req, res, u) {
   }
   if (m && method === 'DELETE') {
     if (!need('product.edit')) return;
-    if (!db.prepare('SELECT id FROM products WHERE id=? AND book_id=?').get(m[1], bookId)) return sendJSON(res, 404, { error: '商品不存在' });
+    const _del = db.prepare('SELECT id, image FROM products WHERE id=? AND book_id=?').get(m[1], bookId);
+    if (!_del) return sendJSON(res, 404, { error: '商品不存在' });
     db.prepare('DELETE FROM inventory WHERE product_id=?').run(m[1]);
     // 🔴 2026-10-17 修：删商品必须连带清关联表，否则留孤儿行。
     //   只清 inventory 留下了 prices / customer_prices 中指向已删商品的行，
@@ -1600,8 +2402,104 @@ async function handleApi(req, res, u) {
     db.prepare('DELETE FROM prices WHERE product_id=?').run(m[1]);
     db.prepare('DELETE FROM customer_prices WHERE product_id=?').run(m[1]);
     db.prepare('DELETE FROM products WHERE id=?').run(m[1]);
+    // 🔴 2026-11-08 图片改成内容去重后**可能被多个商品共用**：
+    //   删商品只在「这张图已经没有任何商品引用」时才真正删文件，否则会把别人的图删掉。
+    unlinkIfUnreferenced(_del.image, '');
     return sendJSON(res, 200, { ok: true });
   }
+  // ---------- 商品图片（2026-11-07）----------
+  // 图片放 public/uploads/products/，直接由 serveStatic 提供，不需要额外路由。
+  // 🔴 为什么走 base64 而不做 multipart：
+  //   项目里没有 multer，手写 multipart 解析容易出边界 bug；
+  //   图片在客户端已压到 ~200KB，base64 后仍在 getBody 的 10MB 限制内。
+  // 🔴 文件名一律重新生成（p<id>_<ts>.<ext>），绝不使用客户端给的文件名 ——
+  //   否则 ../ 或双扩展名会变成任意文件写 / 可执行文件。
+  m = p.match(/^\/api\/products\/(\d+)\/image$/);
+  if (m && method === 'POST') {
+    if (!need('product.edit')) return;
+    const pid = Number(m[1]);
+    const row = db.prepare('SELECT id, image FROM products WHERE id=? AND book_id=?').get(pid, bookId);
+    if (!row) return sendJSON(res, 404, { error: '商品不存在' });
+    const b = await getBody(req);
+    const raw = String(b.data || '');
+    const mm = raw.match(/^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=\s]+)$/i);
+    if (!mm) return sendJSON(res, 400, { error: '图片格式不支持（仅 PNG/JPG/WEBP）' });
+    const ext = (mm[1].toLowerCase() === 'jpeg' ? 'jpg' : mm[1].toLowerCase());
+    const buf = Buffer.from(mm[2].replace(/\s/g, ''), 'base64');
+    if (!buf.length) return sendJSON(res, 400, { error: '图片为空' });
+    if (buf.length > 3 * 1024 * 1024) return sendJSON(res, 400, { error: '图片过大（>3MB）' });
+    // 🔴 内容去重：同一张图全平台只存一份，直接复用已有文件
+    const rel = saveImageDedup(buf, '.' + ext);
+    if (!rel) return sendJSON(res, 400, { error: '图片保存失败' });
+    db.prepare('UPDATE products SET image=? WHERE id=?').run(rel, pid);
+    // 旧图可能被别的商品/账套共用 → 只在没人引用时才删
+    unlinkIfUnreferenced(row.image, rel);
+    return sendJSON(res, 200, { image: rel });
+  }
+  // 删除商品图片 → 前端显示默认占位图
+  if (m && method === 'DELETE') {
+    if (!need('product.edit')) return;
+    const pid = Number(m[1]);
+    const row = db.prepare('SELECT id, image FROM products WHERE id=? AND book_id=?').get(pid, bookId);
+    if (!row) return sendJSON(res, 404, { error: '商品不存在' });
+    db.prepare("UPDATE products SET image='' WHERE id=?").run(pid);
+    // 🔴 先更新库、再判引用：去重后同文件可能仍被别的商品使用
+    unlinkIfUnreferenced(row.image, '');
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  // ---------- 平台图库匹配（2026-11-07）----------
+  // 经理需求：新建商品时点「获取同类照片」，自动从**全平台**已上传的图片里找同类商品的图。
+  // 优先按条码精确匹配，没有则按商品名模糊匹配。
+  //
+  // 🔴🔴 隐私红线（必须守住）：
+  //   ① 响应里**绝不能**出现来源账套/账号/商品 id/名称 —— 只回一个本地图片地址；
+  //   ② 做法是**服务端把图复制一份**到 /uploads/products/ 下用随机名，客户端拿到的
+  //      是新地址，从 URL 上无法反推它来自哪个账套；
+  //   ③ 匹配过程完全在服务端完成，客户端只提交「条码/名称」两个查询条件；
+  //   ④ 不返回「匹配到几条」「来自哪个账套」这类旁路信息，连数量都不给。
+  if (p === '/api/product-image/match' && method === 'POST') {
+    if (!need('product.edit')) return;
+    const b = await getBody(req);
+    const bc = String(b.barcode || '').trim();
+    const nm = String(b.name || '').trim();
+    const pid = Number(b.exclude_id) || 0;   // 编辑时排除自己，避免「匹配到自己」
+
+    let srcRel = '';
+    let matched = 'none';
+
+    // ① 条码精确优先（跨全部账套）
+    if (bc) {
+      const row = db.prepare(
+        "SELECT image FROM products WHERE barcode=? AND barcode<>'' " +
+        "AND image IS NOT NULL AND image<>'' AND id<>? ORDER BY id DESC LIMIT 1"
+      ).get(bc, pid);
+      if (row && row.image) { srcRel = row.image; matched = 'barcode'; }
+    }
+
+    // ② 名称模糊：取出有图的商品在内存里打分（中文按二元组重合率）
+    if (!srcRel && nm) {
+      const rows = db.prepare(
+        "SELECT name, image FROM products WHERE image IS NOT NULL AND image<>'' AND id<>? " +
+        "ORDER BY id DESC LIMIT 1500"
+      ).all(pid);
+      let best = 0;
+      for (const r of rows) {
+        const sc = nameScore(nm, r.name);
+        if (sc > best) { best = sc; srcRel = r.image; }
+      }
+      // 0.55 是实测阈值：再低会把「酸牛奶」匹配到「酸辣粉」
+      if (best >= 0.55) matched = 'name'; else srcRel = '';
+    }
+
+    if (!srcRel) return sendJSON(res, 200, { matched: 'none' });
+
+    const rel = dedupFromExisting(srcRel);
+    if (!rel) return sendJSON(res, 200, { matched: 'none' });
+    // 只回地址与命中方式，不透露任何来源信息
+    return sendJSON(res, 200, { matched, image: rel });
+  }
+
   if (p === '/api/products/template' && method === 'GET') {
     if (!need('product.edit')) return;
     const buf = xlsxUtil.buildTemplate();
@@ -3753,9 +4651,16 @@ function serveStatic(req, res, pathname) {
       //    再叠加 gzip 压缩缓存层，浏览器会把旧版 CSS/JS 永久锁死 —— 实测
       //    「移动端媒体查询改了但线上仍按 220px 侧栏渲染，MAIN 只剩 170px」。
       //    改成 must-revalidate：命中 ETag 时只发 304，几乎零开销，但内容永远是最新的。
-      cacheCtrl = pathname.indexOf('?v=') >= 0 || (req.url && req.url.indexOf('?v=') >= 0)
-        ? 'public, max-age=0, must-revalidate'
-        : 'no-cache';
+      // 🔴🔴 2026-11-08 商品图用**内容哈希命名** → 同一个 URL 的字节永远不变，
+      //   可以安全地给一年 immutable：浏览器/中转层命中后**完全不再回源**。
+      //   服务器按流量计费，这一条能省掉绝大多数图片重复下载。
+      if (pathname.indexOf('/uploads/products/') === 0) {
+        cacheCtrl = 'public, max-age=31536000, immutable';
+      } else {
+        cacheCtrl = pathname.indexOf('?v=') >= 0 || (req.url && req.url.indexOf('?v=') >= 0)
+          ? 'public, max-age=0, must-revalidate'
+          : 'no-cache';
+      }
     }
     // 用内容哈希做 ETag（必须先算：下方压缩缓存的 key 依赖它）
     const etag = 'W/"' + crypto.createHash('md5').update(data).digest('hex') + '"';
@@ -3777,6 +4682,10 @@ function serveStatic(req, res, pathname) {
       }
     }
     const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    // 🔴 防外链第二道：浏览器层面禁止跨站引用我们的静态大文件
+    if (pathname.indexOf('/uploads/') === 0 || pathname.indexOf('/downloads/') === 0) {
+      headers['Cross-Origin-Resource-Policy'] = 'same-site';
+    }
     if (encoding) headers['Content-Encoding'] = encoding;
     // 明确给出 Content-Length：否则走 chunked，客户端拿不到总大小，App 内更新进度条无法显示百分比
     headers['Content-Length'] = body.length;
@@ -3789,6 +4698,22 @@ function serveStatic(req, res, pathname) {
 }
 
 const requestHandler = async (req, res) => {
+  // 🔴🔴 2026-11-08 防外链：必须放在**最外层入口**。
+  //   踩过的坑：一开始写进了 handleApi()，而那个函数只处理 /api/ 前缀，
+  //   图片 (/uploads/...) 和安装包 (/downloads/...) 走的是 serveStatic，
+  //   检查根本不会执行 —— 实测外站 Referer 仍然能拿到图。
+  try {
+    const _hp = new URL(req.url, 'http://x').pathname;
+    if (isHotlinkBlocked(req, _hp)) {
+      res.writeHead(403, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Cross-Origin-Resource-Policy': 'same-site'
+      });
+      return res.end('Forbidden: hotlink not allowed');
+    }
+  } catch (e) { /* 解析失败不拦，交给后续逻辑 */ }
+
   // CORS：原生打包 App 的页面源是 capacitor://localhost，访问接口属跨域，需放行
   const origin = req.headers.origin;
   if (origin) {

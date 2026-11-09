@@ -1,4 +1,4 @@
 <resources>
-    <!-- 🔴 v5.7.14 经理「app名称不用写（原生）」：桌面图标名去掉「(原生)」后缀 -->
-    <string name="app_name">简单ERP</string>
+    <!-- 🔴 app_name 由 build.gradle 的 resValue 注入（正式版「简单ERP」/ 重构版「简单ERP 重构版」），
+         此处不能再定义同名资源，否则 duplicate resource 编译失败。 -->
 </resources>

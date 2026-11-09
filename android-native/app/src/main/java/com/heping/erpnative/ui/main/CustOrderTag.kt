@@ -1,5 +1,6 @@
 package com.heping.erpnative.ui.main
 
+import com.heping.erpnative.ui.theme.ErpColors
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
@@ -27,7 +28,8 @@ import com.heping.erpnative.data.Order
  *   3. 紫色（#8A4FD3）与本 App 主色（#534AB7 深紫）刻意拉开一档，
  *      免得跟「已结清/部分收」这些结算标签混在一起。
  */
-private val CUST_TAG = Color(0xFF8A4FD3)
+// 🔴 改用语义色：深浅主题下都能读清（原来是硬编码，深色下偏暗）
+private val CUST_TAG: Color @Composable get() = ErpColors.customerTag
 
 /** 紫色「客户自助」badge。老订单 / 商家代开单返回 null，调用方直接不渲染。 */
 @Composable
@@ -43,8 +45,8 @@ fun CustOrderBadge(name: String? = null) {
         fontWeight = FontWeight.Bold,
         modifier = Modifier
             .padding(start = 4.dp)
-            .background(CUST_TAG.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-            .border(1.dp, CUST_TAG.copy(alpha = 0.30f), RoundedCornerShape(4.dp))
+            .background(CUST_TAG.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+            .border(1.dp, CUST_TAG.copy(alpha = 0.30f), RoundedCornerShape(8.dp))
             .padding(horizontal = 5.dp, vertical = 1.dp)
     )
 }
@@ -53,6 +55,7 @@ fun CustOrderBadge(name: String? = null) {
  * 订单卡片的左侧竖条 Modifier。
  * 颜色与 badge 一致 —— 扫列表时**不用逐行读字**就能把客户自助单挑出来。
  */
+@Composable
 fun custCardBar(on: Boolean): Modifier =
     if (on) Modifier.border(
         width = 3.dp,

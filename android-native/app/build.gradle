@@ -7,12 +7,18 @@ plugins {
 
 android {
     namespace 'com.heping.erpnative'
-    compileSdk 34
+    // 🔴 v6.0 重构：compileSdk/targetSdk 34 → 36（Android 16）
+    compileSdk 36
 
     defaultConfig {
-        applicationId 'com.heping.erpnative'
+        // 🔴🔴 双身份构建：
+        //   默认（不加参数）= 重构版，包名带 .refactor → 与正式版并存、互不覆盖，供验收用。
+        //   发版时加 -PerpRelease=true = 正式版身份，包名与线上一致，**才能覆盖安装/在线更新**。
+        //   ⚠️ 两者签名相同（同一 keystore），但包名不同 → 不会互相冲突。
+        def isRelease = project.hasProperty('erpRelease')
+        applicationId isRelease ? 'com.heping.erpnative' : 'com.heping.erpnative.refactor'
         minSdk 24
-        targetSdk 34
+        targetSdk 36
         // 🔴 v4.7 起改走HTTPS。之前是明文 HTTP，Manifest 里开了
         //   usesCleartextTraffic="true" —— 登录密码、订单金额在公网明文传输，
         //   同一个 WiFi 下可被直接抓包窃听。
@@ -54,9 +60,18 @@ android {
         //   ② 「app名称不用写」：App 内不再显示「简单ERP」文案（改用图标），桌面图标名去掉「(原生)」
         // 🔴 v5.7.15：① 订单页顶部按钮去重（两处「全部」→「不限」+「全部单」）+ 修「不限」点了不生效
         //   ② 类型筛选改服务端 status 过滤 ③ 全面屏底部导航条配色跟随主题
-        versionCode 73
-        versionName "5.7.15"
+        // 🔴 v5.7.16：修「底部还是有颜色差异」—— NavigationBar 默认 tonalElevation=3dp 会叠一层
+        //   主色调，比下方系统手势区偏亮偏紫。改为 tonalElevation=0 + 显式 surfaceContainer，
+        //   窗口导航栏色与组件容器色取同一个 token，逐像素一致。
+        // 🔴 版本号：正式版必须 > 线上 74，否则不会被识别为更新
+        //    重构版走独立序列（9xx），互不干扰
+        def relVc = project.hasProperty('erpVc') ? project.property('erpVc').toInteger() : 83
+        def relVn = project.hasProperty('erpVn') ? project.property('erpVn').toString() : "6.0.8"
+        versionCode isRelease ? relVc : 904
+        versionName isRelease ? relVn : "6.0.8-demo"
         vectorDrawables { useSupportLibrary true }
+        // 应用名：正式版「简单ERP」；重构版加后缀，便于与正式版并存时区分
+        resValue "string", "app_name", isRelease ? "简单ERP" : "简单ERP 重构版"
         // 服务器地址：由 settings.gradle 解析并校验（占位符/非 https 会直接中断构建）。
         //   🔴 必须读 gradle.ext.erpApiBase，**不能写 rootProject.ext.erpApiBase** ——
         //   后者会退化成 gradle.properties 里的同名 project property（占位符），
@@ -142,12 +157,13 @@ android {
     }
     kotlinOptions { jvmTarget = '17' }
 
+    // 🔴 v6.0 首次尝试用 Kotlin 2.4.21 导致启动闪退 → 回退到 1.9.24 的写法
+    composeOptions {
+        kotlinCompilerExtensionVersion '1.5.14'
+    }
     buildFeatures {
         compose true
         buildConfig true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion '1.5.14'
     }
     packagingOptions {
         resources {
@@ -224,11 +240,19 @@ dependencies {
     implementation 'com.caverock:androidsvg:1.4'
 
     // ML Kit 中文文字识别（bundled 模型，离线可用，无需 Google Play 服务）
-    implementation 'com.google.mlkit:text-recognition-chinese:16.0.0'
+    // 🔴🔴 v6.0 闪退根因修复：16.0.0 的 OCR 原生库是 **4KB 页对齐**，
+    //   而 targetSdk 35+ 在 16KB 页设备上要求 16KB 对齐 → 原生库加载失败 → 启动即崩，
+    //   且崩在 Application.onCreate 之前，所以**一行日志都留不下**。
+    //   16.0.1 起传递依赖 bundled-common:17.0.0，该版本已重建为 16KB 对齐（实测 p_align=16384）。
+    implementation 'com.google.mlkit:text-recognition-chinese:16.0.1'
     // ML Kit 条码扫描（bundled，离线可用）：扫码枪扫商品条码 / 扫纸质单据上的单号
     implementation 'com.google.mlkit:barcode-scanning:17.3.0'
     // CameraX 取景（扫码用）
-    implementation 'androidx.camera:camera-camera2:1.3.4'
-    implementation 'androidx.camera:camera-lifecycle:1.3.4'
-    implementation 'androidx.camera:camera-view:1.3.4'
+    // 🔴🔴 v6.0 闪退根因（之二）：CameraX 1.3.4 的 libimage_processing_util_jni.so 是 4KB 对齐，
+    //    targetSdk35+ 在 16KB 页设备上加载直接失败 → 启动/开门扫即崩。
+    //    1.4.2 起已重建为 16KB 对齐（实测 p_align=16384）。取 1.5.3：
+    //    1.6.x 的 Kotlin 元数据是 2.1，与本项目的 Kotlin 1.9.24 不兼容，故停在 1.5.x。
+    implementation 'androidx.camera:camera-camera2:1.5.3'
+    implementation 'androidx.camera:camera-lifecycle:1.5.3'
+    implementation 'androidx.camera:camera-view:1.5.3'
 }

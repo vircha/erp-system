@@ -173,7 +173,7 @@ function init(ctx) {
   function adminOverview() {
     const accounts = db.prepare(`
       SELECT a.id,a.username,a.display_name,a.role,a.active,a.is_admin,a.whitelisted,
-             a.banned_reason,a.banned_at,a.created_at,
+             a.approved,a.banned_reason,a.banned_at,a.created_at,
              (SELECT COUNT(*) FROM accounts x WHERE x.book_id=a.book_id) AS book_total
       FROM accounts a ORDER BY a.id DESC`).all();
     const stats = db.prepare(`
@@ -182,6 +182,7 @@ function init(ctx) {
         (SELECT COUNT(*) FROM accounts WHERE active=0) AS banned,
         (SELECT COUNT(*) FROM accounts WHERE is_admin=1) AS admins,
         (SELECT COUNT(*) FROM accounts WHERE whitelisted=1) AS whitelisted,
+        (SELECT COUNT(*) FROM accounts WHERE approved=0) AS awaiting,
         (SELECT COUNT(*) FROM violations WHERE status='pending') AS pending,
         (SELECT COUNT(*) FROM violations WHERE status='banned') AS auto_banned`).get();
     const violations = db.prepare(`
